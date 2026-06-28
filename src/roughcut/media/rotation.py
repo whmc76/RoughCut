@@ -19,6 +19,7 @@ import re
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 from pathlib import Path
 
 from roughcut.config import get_settings
@@ -28,6 +29,13 @@ _VALID_ROTATIONS = {0, 90, 180, 270}
 _VISION_FRAME_COUNT = 3
 _VISION_CONFIDENCE_THRESHOLD = 0.62
 _VISION_STRONG_CONFIDENCE_THRESHOLD = 0.8
+_ROTATION_FILTERS = {
+    90: ("transpose=1",),
+    180: ("hflip", "vflip"),
+    270: ("transpose=2",),
+}
+_ORIENTATION_DECISION_CACHE_DIR = Path("data") / "runtime" / "orientation_decisions"
+_ORIENTATION_DECISION_CACHE_VERSION = "pov-v3"
 
 
 @dataclass(frozen=True)
@@ -64,6 +72,71 @@ async def detect_video_rotation(source_path: Path) -> int:
     return (await detect_video_rotation_decision(source_path)).rotation_cw
 
 
+def normalize_rotation_payload(payload: dict[str, object] | object | None) -> dict[str, object]:
+    if payload is None:
+        payload_dict: dict[str, object] = {}
+    elif isinstance(payload, RotationDecision):
+        payload_dict = payload.to_dict()
+    elif isinstance(payload, dict):
+        payload_dict = dict(payload)
+    elif hasattr(payload, "to_dict"):
+        try:
+            maybe_payload = payload.to_dict()
+            payload_dict = dict(maybe_payload) if isinstance(maybe_payload, dict) else {}
+        except Exception:
+            payload_dict = {}
+    else:
+        payload_dict = {}
+
+    try:
+        raw_rotation = int(float(payload_dict.get("rotation_cw") or payload_dict.get("rotation") or 0))
+    except Exception:
+        raw_rotation = 0
+    normalized_rotation = raw_rotation % 360
+    rotation_cw = min(
+        _VALID_ROTATIONS,
+        key=lambda value: min(abs(value - normalized_rotation), 360 - abs(value - normalized_rotation)),
+    )
+    return {
+        "rotation_cw": int(rotation_cw),
+        "source": str(payload_dict.get("source") or "").strip(),
+        "confidence": _safe_confidence(payload_dict.get("confidence")),
+        "reason": str(payload_dict.get("reason") or "").strip(),
+        "metadata_rotation_cw": _safe_int(payload_dict.get("metadata_rotation_cw"), 0) % 360,
+    }
+
+
+def build_orientation_video_filter(
+    orientation_decision: dict[str, object] | object | None,
+    *extra_filters: str,
+) -> str:
+    """
+    Build an ffmpeg filter chain that uses RoughCut's visual orientation decision.
+
+    Callers should pair this with ``-noautorotate`` so ffmpeg does not apply
+    source Display Matrix metadata before these explicit filters run.
+    """
+    rotation_cw = int(normalize_rotation_payload(orientation_decision).get("rotation_cw") or 0)
+    filters = [*_ROTATION_FILTERS.get(rotation_cw, ()), "sidedata=mode=delete:type=DISPLAYMATRIX"]
+    filters.extend(filter(None, (str(item or "").strip() for item in extra_filters)))
+    return ",".join(filters)
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
+def _safe_confidence(value: object) -> float:
+    try:
+        confidence = float(value)
+    except Exception:
+        confidence = 0.0
+    return max(0.0, min(1.0, confidence))
+
+
 async def detect_video_rotation_decision(source_path: Path) -> RotationDecision:
     """
     Return a traceable rotation decision for the source video.
@@ -93,6 +166,9 @@ async def detect_video_rotation_decision(source_path: Path) -> RotationDecision:
             reason="Source metadata already reports upright orientation",
             metadata_rotation_cw=0,
         )
+    cached_decision = _read_cached_orientation_decision(source_path, metadata_rotation=metadata_rotation)
+    if cached_decision is not None:
+        return cached_decision
 
     with tempfile.TemporaryDirectory() as tmpdir:
         frames = _extract_raw_frames(source_path, duration, Path(tmpdir), count=_VISION_FRAME_COUNT)
@@ -115,11 +191,18 @@ async def detect_video_rotation_decision(source_path: Path) -> RotationDecision:
                 json_mode=True,
             )
             vision = _parse_vision_rotation(answer)
-            return _resolve_rotation_decision(
+            vision = _guard_weak_pov_180_decision(
+                vision,
+                source_path=source_path,
+                metadata_rotation=metadata_rotation,
+            )
+            decision = _resolve_rotation_decision(
                 vision=vision,
                 metadata_rotation=metadata_rotation,
                 frame_count=len(frames),
             )
+            _write_cached_orientation_decision(source_path, decision)
+            return decision
         except Exception:
             return RotationDecision(
                 rotation_cw=metadata_rotation,
@@ -129,6 +212,138 @@ async def detect_video_rotation_decision(source_path: Path) -> RotationDecision:
                 metadata_rotation_cw=metadata_rotation,
                 frame_count=len(frames),
             )
+
+
+def _read_cached_orientation_decision(
+    source_path: Path,
+    *,
+    metadata_rotation: int,
+) -> RotationDecision | None:
+    cache_path = _orientation_decision_cache_path(source_path)
+    if cache_path is None or not cache_path.exists():
+        return None
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    normalized = normalize_rotation_payload(payload)
+    confidence = _safe_confidence(payload.get("confidence") if isinstance(payload, dict) else None)
+    if confidence < _VISION_CONFIDENCE_THRESHOLD:
+        return None
+    if str(payload.get("cache_version") or "") != _ORIENTATION_DECISION_CACHE_VERSION:
+        return None
+    source = str(payload.get("source") or "") if isinstance(payload, dict) else ""
+    if source not in {"vision", "vision_metadata_agree", "vision_cache"}:
+        return None
+    return RotationDecision(
+        rotation_cw=int(normalized["rotation_cw"]),
+        source="vision_cache",
+        confidence=confidence,
+        reason=str(payload.get("reason") or "Cached visual orientation decision").strip()[:240],
+        metadata_rotation_cw=int(metadata_rotation or 0) % 360,
+        frame_count=_safe_int(payload.get("frame_count"), 0) if isinstance(payload, dict) else 0,
+        raw_answer=str(payload.get("raw_answer") or "")[:1000] if isinstance(payload, dict) else "",
+    )
+
+
+def _write_cached_orientation_decision(source_path: Path, decision: RotationDecision) -> None:
+    if decision.source not in {"vision", "vision_metadata_agree"}:
+        return
+    if decision.confidence < _VISION_CONFIDENCE_THRESHOLD:
+        return
+    cache_path = _orientation_decision_cache_path(source_path)
+    if cache_path is None:
+        return
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_payload = {
+            **decision.to_dict(),
+            "cache_version": _ORIENTATION_DECISION_CACHE_VERSION,
+        }
+        cache_path.write_text(json.dumps(cache_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        return
+
+
+def _orientation_decision_cache_path(source_path: Path) -> Path | None:
+    fingerprint = _source_orientation_fingerprint(source_path)
+    if not fingerprint:
+        return None
+    return _ORIENTATION_DECISION_CACHE_DIR / f"{fingerprint}.json"
+
+
+def _source_orientation_fingerprint(source_path: Path) -> str:
+    try:
+        stat = source_path.stat()
+    except OSError:
+        return ""
+    digest = sha256()
+    digest.update(str(source_path.name).encode("utf-8", errors="replace"))
+    digest.update(str(int(stat.st_size)).encode("ascii"))
+    try:
+        with source_path.open("rb") as handle:
+            head = handle.read(1024 * 1024)
+            digest.update(head)
+            if stat.st_size > 1024 * 1024:
+                handle.seek(max(0, stat.st_size - 1024 * 1024))
+                digest.update(handle.read(1024 * 1024))
+    except OSError:
+        return ""
+    return digest.hexdigest()[:24]
+
+
+def _guard_weak_pov_180_decision(
+    vision: _VisionRotation,
+    *,
+    source_path: Path,
+    metadata_rotation: int,
+) -> _VisionRotation:
+    if vision.rotation_cw != 180:
+        return vision
+    if vision.confidence >= 0.9:
+        return vision
+    if int(metadata_rotation or 0) % 360 not in {90, 270}:
+        return vision
+    width, height = _probe_encoded_video_dimensions(source_path)
+    if width <= height:
+        return vision
+    guarded_reason = (
+        "POV guard kept the raw landscape top/bottom relationship: the model chose "
+        "180 degrees below high confidence, while the encoded frames are already "
+        "landscape and the source metadata only suggests a 90/270 portrait transform."
+    )
+    return _VisionRotation(
+        rotation_cw=0,
+        confidence=max(_VISION_CONFIDENCE_THRESHOLD, min(0.78, vision.confidence - 0.05)),
+        reason=guarded_reason,
+        raw_answer=vision.raw_answer,
+    )
+
+
+def _probe_encoded_video_dimensions(source_path: Path) -> tuple[int, int]:
+    try:
+        import json as _json
+        r = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                str(source_path),
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+        data = _json.loads(r.stdout.decode("utf-8", errors="replace"))
+        stream = (data.get("streams") or [{}])[0]
+        return int(stream.get("width") or 0), int(stream.get("height") or 0)
+    except Exception:
+        return 0, 0
 
 
 # ── Frame extraction ──────────────────────────────────────────────────────────
@@ -192,15 +407,28 @@ _ROTATION_PROMPT = (
     "image is a contact sheet made from one raw video frame without metadata "
     "autorotation. The four labeled panels show candidate clockwise rotations: "
     "0, 90, 180, and 270. Choose the single rotation label whose panel looks most "
-    "naturally upright across the sheets. Prioritize gravity cues, faces, hands, "
-    "tabletops, room structure, and the overall scene. Ignore local logos, labels, "
-    "stickers, or text printed on handheld objects because those objects can be "
-    "turned independently inside a correctly oriented video. If the 0 panel already "
-    "looks like a normal landscape or portrait recording, choose 0. Do not choose a "
-    "portrait rotation merely because the file metadata may say portrait.\n\n"
+    "naturally upright across the sheets. The goal is not merely landscape versus "
+    "portrait; the goal is the viewer's natural orientation for the recorded scene. "
+    "For first-person tabletop/product/unboxing footage without an on-camera person, "
+    "use the operator POV as the primary target: the operator is below/behind the "
+    "camera, hands and forearms usually enter from the lower edge, the product or "
+    "box sits in the middle/far side of the table, and fixed packaging, desk mat, "
+    "or background text is easiest to read in the correct direction. A top-down "
+    "table scene can still look plausible after a 180-degree turn, so never choose "
+    "0 over 180 only because both are landscape or both show a horizontal tabletop. "
+    "For POV footage, choose 180 only when the 180 panel itself unmistakably "
+    "preserves the operator POV, especially hands or forearms entering from the "
+    "lower edge; otherwise prefer the raw landscape top/bottom relationship. "
+    "Use gravity cues, room structure, faces, hands, readable fixed text, and the "
+    "global top/bottom relationship of the whole scene. Ignore logos, labels, "
+    "stickers, or text printed on objects actively held or rotated by hand because "
+    "those objects can be turned independently inside a correctly oriented video. "
+    "Do not choose a portrait rotation merely because the file metadata may say "
+    "portrait.\n\n"
     'Return JSON only: {"rotation":0,"confidence":0.0,"reason":""}\n'
     "rotation must be one of 0, 90, 180, 270. Use confidence >= 0.7 only when the "
-    "best panel is clearly more natural than the others."
+    "best panel is clearly more natural than the others. In the reason, name the "
+    "specific visual evidence used for the chosen top/bottom orientation."
 )
 
 

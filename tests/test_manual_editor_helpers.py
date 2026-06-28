@@ -230,6 +230,7 @@ from roughcut.pipeline.steps import (
     _rewrite_packaged_subtitle_copy,
     _shift_render_subtitle_items,
     _bound_render_subtitles_to_duration,
+    _bound_render_subtitles_to_packaged_content_window,
     _stabilize_render_subtitle_timeline,
     _subtitle_item_payload,
     _subtitle_projection_entry_payload,
@@ -2061,6 +2062,21 @@ def test_bound_render_subtitles_to_duration_clamps_variant_sidecar_tail() -> Non
     assert [item["text_final"] for item in bounded] == ["第一条", "第二条"]
     assert bounded[-1]["end_time"] == pytest.approx(23.981)
     assert bounded[-1]["render_duration_bound_repair"] == "clamp_to_variant_duration"
+
+
+def test_bound_render_subtitles_to_packaged_content_window_excludes_outro_tail() -> None:
+    bounded = _bound_render_subtitles_to_packaged_content_window(
+        [
+            {"start_time": 430.0, "end_time": 432.0, "text_final": "正片字幕"},
+            {"start_time": 441.759, "end_time": 450.879, "text_final": "那我们下期再见"},
+            {"start_time": 445.0, "end_time": 447.0, "text_final": "片尾越界"},
+        ],
+        content_end_sec=443.12,
+    )
+
+    assert [item["text_final"] for item in bounded] == ["正片字幕", "那我们下期再见"]
+    assert bounded[-1]["end_time"] == pytest.approx(443.08)
+    assert bounded[-1]["render_duration_bound_repair"] == "clamp_to_packaged_content_window"
 
 
 def test_render_subtitle_alignment_gate_blocks_large_bad_drift_ratio() -> None:

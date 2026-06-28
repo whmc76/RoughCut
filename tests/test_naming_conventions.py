@@ -225,6 +225,18 @@ def test_avatar_capability_status_uses_business_capability_keys() -> None:
     }
 
 
+def test_avatar_capability_status_accepts_legacy_heygem_avatar_key() -> None:
+    normalized = normalize_avatar_capability_status(
+        {
+            "heygem_avatar": "ready",
+            "voice_clone": "ready",
+        }
+    )
+
+    assert normalized[AVATAR_CAPABILITY_GENERATION] == "ready"
+    assert "heygem_avatar" not in normalized
+
+
 def test_runtime_avatar_capabilities_do_not_emit_provider_specific_keys() -> None:
     capability, _next_action = _derive_runtime_preview_capability(
         {"avatar_generation": "ready", "voice_clone": "ready"},

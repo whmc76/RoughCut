@@ -166,6 +166,7 @@ function buildJobWorkspaceMock(overrides: Record<string, unknown> = {}) {
       hyperframesOptions: {},
       creatorCardId: "",
       executionMode: "auto",
+      autoGeneratePublicationMaterials: false,
       platformTargets: [],
       translationTargetLanguage: "auto",
       taskBrief: "",
@@ -187,6 +188,7 @@ function buildJobWorkspaceMock(overrides: Record<string, unknown> = {}) {
         hyperframesOptions: {},
         creatorCardId: "",
         executionMode: "auto",
+        autoGeneratePublicationMaterials: false,
         platformTargets: [],
         translationTargetLanguage: "auto",
         taskBrief: "",
@@ -206,6 +208,7 @@ function buildJobWorkspaceMock(overrides: Record<string, unknown> = {}) {
         hyperframesOptions: {},
         creatorCardId: "",
         executionMode: "auto",
+        autoGeneratePublicationMaterials: false,
         platformTargets: [],
         translationTargetLanguage: "auto",
         taskBrief: "",
@@ -225,6 +228,7 @@ function buildJobWorkspaceMock(overrides: Record<string, unknown> = {}) {
         hyperframesOptions: {},
         creatorCardId: "",
         executionMode: "plan_first",
+        autoGeneratePublicationMaterials: false,
         platformTargets: [],
         translationTargetLanguage: "auto",
         taskBrief: "",
@@ -420,6 +424,7 @@ describe("JobsPage audit interactions", () => {
       workflowMode: "smart_director",
       jobFlowMode: "auto",
       executionMode: "plan_first",
+      autoGeneratePublicationMaterials: false,
     }));
   });
 
@@ -608,6 +613,7 @@ describe("JobsPage audit interactions", () => {
       hyperframesOptions: {},
       creatorCardId: "",
       executionMode: "auto",
+      autoGeneratePublicationMaterials: false,
       platformTargets: [],
       translationTargetLanguage: "auto",
       taskBrief: "",
@@ -633,6 +639,7 @@ describe("JobsPage audit interactions", () => {
       hyperframesOptions: { subtitle_emphasis: false, unified_subtitle_style: true },
       creatorCardId: "creator-1",
       executionMode: "plan_first",
+      autoGeneratePublicationMaterials: false,
       platformTargets: [],
       translationTargetLanguage: "auto",
       taskBrief: "",
@@ -710,6 +717,7 @@ describe("JobsPage audit interactions", () => {
         hyperframesOptions: {},
         creatorCardId: "",
         executionMode: "auto",
+        autoGeneratePublicationMaterials: false,
         platformTargets: [],
         translationTargetLanguage: "auto",
         taskBrief: "",
@@ -759,6 +767,7 @@ describe("JobsPage audit interactions", () => {
         hyperframesOptions: {},
         creatorCardId: "",
         executionMode: "auto",
+        autoGeneratePublicationMaterials: false,
         platformTargets: [],
         translationTargetLanguage: "auto",
         taskBrief: "",
@@ -808,6 +817,7 @@ describe("JobsPage audit interactions", () => {
         hyperframesOptions: {},
         creatorCardId: "",
         executionMode: "auto",
+        autoGeneratePublicationMaterials: false,
         platformTargets: [],
         translationTargetLanguage: "auto",
         taskBrief: "",
@@ -920,6 +930,58 @@ describe("JobsPage audit interactions", () => {
     }));
   });
 
+  it("toggles automatic publication material generation from the create task modal", () => {
+    const setUpload = vi.fn();
+    jobWorkspaceMock.mockReturnValue(buildJobWorkspaceMock({
+      setUpload,
+      upload: {
+        files: [],
+        language: "zh-CN",
+        workflowTemplate: "",
+        jobFlowMode: "auto",
+        workflowMode: "standard_edit",
+        enhancementModes: [],
+        selectedSmartCutRuleReasons: [],
+        materialEnhancementModes: [],
+        selectedAgentCapabilityKeys: [],
+        hyperframesOptions: {},
+        creatorCardId: "",
+        executionMode: "auto",
+        autoGeneratePublicationMaterials: false,
+        platformTargets: [],
+        translationTargetLanguage: "auto",
+        taskBrief: "",
+        outputDir: "",
+        videoDescription: "",
+      },
+      options: {
+        data: {
+          job_languages: [{ value: "zh-CN", label: "简体中文" }],
+          workflow_templates: [{ value: "", label: "自动匹配" }],
+          workflow_modes: [{ value: "standard_edit", label: "标准成片" }],
+          enhancement_modes: [],
+          smart_cut_rules: [],
+          capability_catalog: [],
+        },
+      },
+    }));
+
+    renderWithQueryClient(
+      <I18nProvider>
+        <MemoryRouter initialEntries={["/jobs"]}>
+          <JobsPage />
+        </MemoryRouter>
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "全能剪辑" }));
+    fireEvent.click(screen.getByLabelText("自动生成发布物料"));
+
+    expect(setUpload).toHaveBeenCalledWith(expect.objectContaining({
+      autoGeneratePublicationMaterials: true,
+    }));
+  });
+
   it("shows a second-language selector when subtitle translation is enabled", () => {
     const setUpload = vi.fn();
     jobWorkspaceMock.mockReturnValue(buildJobWorkspaceMock({
@@ -937,6 +999,7 @@ describe("JobsPage audit interactions", () => {
         hyperframesOptions: {},
         creatorCardId: "",
         executionMode: "auto",
+        autoGeneratePublicationMaterials: false,
         platformTargets: [],
         translationTargetLanguage: "ja-JP",
         taskBrief: "",

@@ -73,7 +73,11 @@ data/intelligent_copy/
 # Open-source privacy guardrails: local identity, tasks, memory, and generated state
 data/avatar_materials/**
 data/creator_profiles/**
+!data/creator_profiles/
+!data/creator_profiles/demo_creator.json
 data/remix_production_tasks/**
+!data/remix_production_tasks/
+!data/remix_production_tasks/example_remix_pending.json
 data/content_profile_review_stats.json
 data/*hotword*
 data/*learned*

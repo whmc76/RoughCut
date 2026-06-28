@@ -34,6 +34,18 @@
       "supports_declaration": true,
       "default_declaration": "内容无需标注",
       "supports_scheduled_publish": true,
+      "content_contract": {
+        "has_title": true,
+        "title_label": "标题",
+        "body_label": "简介",
+        "tag_label": "标签",
+        "separate_tags": true,
+        "tags_embedded_in_body": false,
+        "title_limit": 80,
+        "body_limit": 250,
+        "tag_limit": 10,
+        "tag_style": "csv"
+      },
       "publish_scheme": {
         "entry_url": "https://member.bilibili.com/platform/upload/video/frame",
         "draft_resume_policy": "discard_existing_draft",
@@ -89,6 +101,18 @@
       "supports_declaration": true,
       "default_declaration": "无需添加自主声明",
       "supports_scheduled_publish": true,
+      "content_contract": {
+        "has_title": true,
+        "title_label": "作品标题",
+        "body_label": "作品描述",
+        "tag_label": "话题/标签",
+        "separate_tags": true,
+        "tags_embedded_in_body": false,
+        "title_limit": 55,
+        "body_limit": 300,
+        "tag_limit": 5,
+        "tag_style": "hashtags_space"
+      },
       "publish_scheme": {
         "entry_url": "https://creator.douyin.com/creator-micro/content/upload",
         "draft_resume_policy": "discard_existing_draft",
@@ -125,6 +149,18 @@
       "supports_declaration": true,
       "default_declaration": "个人观点，仅供参考",
       "supports_scheduled_publish": true,
+      "content_contract": {
+        "has_title": false,
+        "title_label": "",
+        "body_label": "作品描述",
+        "tag_label": "作品描述内话题",
+        "separate_tags": false,
+        "tags_embedded_in_body": true,
+        "title_limit": 0,
+        "body_limit": 300,
+        "tag_limit": 4,
+        "tag_style": "hashtags_space"
+      },
       "publish_scheme": {
         "entry_url": "https://cp.kuaishou.com/article/publish/video",
         "draft_resume_policy": "discard_existing_draft",
@@ -172,6 +208,18 @@
       "supports_declaration": false,
       "default_declaration": "",
       "supports_scheduled_publish": true,
+      "content_contract": {
+        "has_title": true,
+        "title_label": "标题",
+        "body_label": "简介",
+        "tag_label": "",
+        "separate_tags": false,
+        "tags_embedded_in_body": false,
+        "title_limit": 30,
+        "body_limit": 1000,
+        "tag_limit": 0,
+        "tag_style": ""
+      },
       "publish_scheme": {
         "entry_url": "https://mp.toutiao.com/profile_v4/xigua/upload-video?index=0",
         "draft_resume_policy": "discard_existing_draft",
@@ -193,8 +241,8 @@
       "auto_publish_supported": false,
       "material_generation_only": true,
       "auto_publish_disabled_reason": "当前平台仅支持生成发布物料，自动发布已暂停。",
-      "manual_handoff_only": false,
-      "manual_publish_entry_url": "",
+      "manual_handoff_only": true,
+      "manual_publish_entry_url": "https://channels.weixin.qq.com/login.html",
       "requires_explicit_collection_policy": true,
       "requires_custom_cover_policy": true,
       "required_cover_slots": [
@@ -215,6 +263,19 @@
       "default_declaration": "",
       "supports_scheduled_publish": true,
       "skip_explicit_visibility_entry": true,
+      "skip_explicit_tag_entry": true,
+      "content_contract": {
+        "has_title": false,
+        "title_label": "",
+        "body_label": "描述",
+        "tag_label": "描述内话题",
+        "separate_tags": false,
+        "tags_embedded_in_body": true,
+        "title_limit": 0,
+        "body_limit": 1000,
+        "tag_limit": 6,
+        "tag_style": "hashtags_space"
+      },
       "publish_scheme": {
         "entry_url": "https://channels.weixin.qq.com/platform/post/create",
         "draft_resume_policy": "discard_existing_draft",
@@ -224,9 +285,7 @@
         "upload_processing_blocks_final_publish_only": true,
         "projects": [
           { "key": "media_upload", "label": "上传视频", "result_key": "media_attached" },
-          { "key": "title", "label": "填写标题", "result_key": "title_ready" },
-          { "key": "body", "label": "填写描述", "result_key": "body_ready" },
-          { "key": "tags", "label": "填写标签/话题", "result_key": "tags_ready" },
+          { "key": "body", "label": "填写描述（含话题）", "result_key": "body_ready" },
           { "key": "collection", "label": "加入合集", "result_key": "collection_ready" },
           { "key": "original_statement", "label": "设置原创声明/原创类型", "result_key": "original_statement_ready" },
           { "key": "cover_upload_4_3", "label": "上传视频号动态封面 4:3", "result_key": "cover_4_3_ready" },
@@ -237,9 +296,7 @@
         ],
         "completion_requirements": {
           "video_attached": true,
-          "title_required": true,
-          "body_required": true,
-          "tags_required": true,
+          "body_with_embedded_tags": true,
           "collection_strategy_required": true,
           "main_cover_slot": "landscape_4_3",
           "secondary_cover_slot": "portrait_3_4",
@@ -265,6 +322,18 @@
       "default_declaration": "原创声明",
       "supports_scheduled_publish": true,
       "minimum_schedule_lead_minutes": 60,
+      "content_contract": {
+        "has_title": true,
+        "title_label": "标题",
+        "body_label": "正文",
+        "tag_label": "话题",
+        "separate_tags": true,
+        "tags_embedded_in_body": false,
+        "title_limit": 20,
+        "body_limit": 1000,
+        "tag_limit": 8,
+        "tag_style": "hashtags_space"
+      },
       "publish_scheme": {
         "entry_url": "https://creator.xiaohongshu.com/publish",
         "draft_resume_policy": "discard_existing_draft",
@@ -301,6 +370,18 @@
         "tags"
       ],
       "skip_explicit_tag_entry": true,
+      "content_contract": {
+        "has_title": true,
+        "title_label": "标题",
+        "body_label": "说明",
+        "tag_label": "标签",
+        "separate_tags": true,
+        "tags_embedded_in_body": false,
+        "title_limit": 100,
+        "body_limit": 5000,
+        "tag_limit": 15,
+        "tag_style": "csv"
+      },
       "publish_scheme": {
         "entry_url": "https://studio.youtube.com/",
         "draft_resume_policy": "discard_existing_draft",
@@ -324,6 +405,18 @@
       "supports_declaration": false,
       "default_declaration": "",
       "supports_scheduled_publish": true,
+      "content_contract": {
+        "has_title": false,
+        "title_label": "",
+        "body_label": "推文",
+        "tag_label": "推文内 Hashtags",
+        "separate_tags": false,
+        "tags_embedded_in_body": true,
+        "title_limit": 0,
+        "body_limit": 280,
+        "tag_limit": 2,
+        "tag_style": "hashtags_space"
+      },
       "publish_scheme": {
         "entry_url": "https://x.com/compose/post",
         "draft_resume_policy": "discard_existing_draft",

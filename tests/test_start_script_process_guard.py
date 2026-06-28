@@ -123,6 +123,22 @@ def test_dev_api_does_not_enable_reload_for_in_process_tool_queue() -> None:
     assert '"--workers", "1"' in api_block
 
 
+def test_dev_durable_services_do_not_run_under_watchfiles() -> None:
+    source = (REPO_ROOT / "docker-compose.dev.yml").read_text(encoding="utf-8")
+    service_names = ("orchestrator", "worker-media", "worker-llm", "worker-agent", "worker-publication")
+
+    for index, service_name in enumerate(service_names):
+        start = source.index(f"  {service_name}:")
+        if index + 1 < len(service_names):
+            end = source.index(f"  {service_names[index + 1]}:", start)
+        else:
+            end = source.index("  frontend-watch:", start)
+        service_block = source[start:end]
+
+        assert "watchfiles" not in service_block
+        assert 'command: ["roughcut"' in service_block
+
+
 def test_automation_compose_mounts_runtime_root_inside_container() -> None:
     source = (REPO_ROOT / "docker-compose.automation.yml").read_text(encoding="utf-8")
 

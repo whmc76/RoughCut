@@ -38,6 +38,8 @@ from roughcut.api.schemas import (
     ContentProfileMemoryStatsOut,
     ContentProfileConfirmIn,
     ContentProfileReviewOut,
+    IntelligentCopyGenerateIn,
+    IntelligentCopyGenerateTaskOut,
     JobAgentDecisionOut,
     JobAgentPlanApplyIn,
     JobAgentPlanOut,
@@ -2640,6 +2642,7 @@ async def create_job(
     creator_card_id: str | None = Form(None),
     task_brief: str | None = Form(None),
     execution_mode: str | None = Form(None),
+    auto_generate_publication_materials: str | None = Form(None),
     platform_targets: list[str] | None = Form(None),
     edit_mode: str | None = Form(None),
     automation_level: str | None = Form(None),
@@ -2669,6 +2672,7 @@ async def create_job(
         video_description = _normalize_video_description(video_description)
         task_brief = _normalize_video_description(task_brief)
         execution_mode = normalize_execution_mode(execution_mode)
+        auto_generate_publication_materials_enabled = _normalize_form_bool(auto_generate_publication_materials)
         job_flow_mode = resolve_job_flow_mode_from_execution_mode(
             job_flow_mode,
             execution_mode,
@@ -2755,6 +2759,7 @@ async def create_job(
             material_enhancement_modes=normalized_material_enhancement_modes,
             hyperframes_options=normalized_hyperframes_options,
             translation_target_language=translation_target_language,
+            auto_generate_publication_materials=auto_generate_publication_materials_enabled,
             capability_overrides=(
                 _capability_overrides_from_selected_keys(selected_agent_capability_keys)
                 if selected_agent_capability_keys is not None
@@ -2818,6 +2823,11 @@ def _normalize_video_description(value: str | None) -> str | None:
     if not normalized:
         return None
     return normalized[:4000]
+
+
+def _normalize_form_bool(value: str | None) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized in {"1", "true", "yes", "on", "enabled"}
 
 
 JOB_AGENT_PLAN_REVISION_ARTIFACT_TYPE = "job_agent_plan_revision"
@@ -3122,6 +3132,7 @@ def _build_job_source_context(
     material_enhancement_modes: list[str] | None = None,
     hyperframes_options: dict[str, bool] | None = None,
     translation_target_language: str | None = None,
+    auto_generate_publication_materials: bool = False,
     capability_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     source_context: dict[str, Any] = {}
@@ -3158,6 +3169,11 @@ def _build_job_source_context(
             if translation_target == "auto"
             else {"target_language_mode": "manual", "target_language": translation_target}
         )
+    if auto_generate_publication_materials:
+        source_context["publication"] = {
+            "auto_generate_materials": True,
+            "mode": "render_complete",
+        }
     source_context["hyperframes_options"] = normalize_hyperframes_options(hyperframes_options)
     normalized_capability_overrides = {
         key: "disabled"
@@ -10576,6 +10592,39 @@ async def get_job_publication_plan(
     )
 
 
+@router.post("/{job_id}/publication/material-tasks", response_model=IntelligentCopyGenerateTaskOut)
+async def create_job_publication_material_task(
+    job_id: uuid.UUID,
+    payload: PublicationSubmitIn,
+    session: AsyncSession = Depends(get_session),
+):
+    job, render_output, _packaging, creator_profile = await _load_publication_inputs(
+        job_id=job_id,
+        creator_profile_id=payload.creator_profile_id,
+        session=session,
+    )
+    folder_path = _derive_job_publication_folder_path(job, render_output)
+    if not folder_path:
+        raise HTTPException(status_code=409, detail="无法定位成片目录，不能自动生成发布物料。")
+
+    resolved_creator_profile_id = (
+        str(payload.creator_profile_id or "").strip()
+        or str((creator_profile or {}).get("id") or "").strip()
+        or None
+    )
+    from roughcut.api.intelligent_copy import create_generate_task
+
+    return await create_generate_task(
+        IntelligentCopyGenerateIn(
+            folder_path=folder_path,
+            platforms=payload.platforms,
+            use_existing_cover=False,
+            creator_profile_id=resolved_creator_profile_id,
+            force_regenerate=True,
+        )
+    )
+
+
 @router.post("/{job_id}/publication/materials")
 async def prepare_job_publication_materials(
     job_id: uuid.UUID,
@@ -11399,6 +11448,17 @@ async def _load_publication_inputs(
         .order_by(RenderOutput.created_at.desc())
     )
     render_output = render_result.scalars().first()
+    render_outputs_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=("render_outputs",),
+    )
+    render_outputs_payload = (
+        render_outputs_artifact.data_json
+        if render_outputs_artifact and isinstance(render_outputs_artifact.data_json, dict)
+        else {}
+    )
+    render_output = _select_job_publication_render_output(job, render_output, render_outputs_payload)
 
     packaging_artifact = await _load_latest_optional_artifact(
         session,
@@ -11426,6 +11486,58 @@ async def _load_publication_inputs(
         creator_profile=creator_profile,
     )
     return job, render_output, packaging, creator_profile
+
+
+def _select_job_publication_render_output(
+    job: Job,
+    render_output: RenderOutput | None,
+    render_outputs_payload: dict[str, Any] | None,
+) -> Any | None:
+    payload = render_outputs_payload if isinstance(render_outputs_payload, dict) else {}
+    preferred_path = _preferred_job_publication_media_path(job=job, render_outputs_payload=payload)
+    if not preferred_path:
+        return render_output
+    if render_output is None:
+        return SimpleNamespace(output_path=preferred_path, status="done", progress=1.0)
+    current_path = str(getattr(render_output, "output_path", "") or "").strip()
+    if current_path == preferred_path:
+        return render_output
+    return SimpleNamespace(
+        id=getattr(render_output, "id", None),
+        job_id=getattr(render_output, "job_id", getattr(job, "id", None)),
+        timeline_id=getattr(render_output, "timeline_id", None),
+        output_path=preferred_path,
+        status=getattr(render_output, "status", "done"),
+        progress=getattr(render_output, "progress", 1.0),
+        created_at=getattr(render_output, "created_at", None),
+    )
+
+
+def _preferred_job_publication_media_path(
+    *,
+    job: Job,
+    render_outputs_payload: dict[str, Any] | None,
+) -> str:
+    payload = render_outputs_payload if isinstance(render_outputs_payload, dict) else {}
+    enhancement_modes = {
+        str(item or "").strip()
+        for item in (getattr(job, "enhancement_modes", None) or [])
+        if str(item or "").strip()
+    }
+    enhanced_path = _first_existing_runtime_path(payload.get("enhanced_mp4"), file_only=True)
+    if enhanced_path is not None:
+        return str(enhanced_path)
+    avatar_result = payload.get("avatar_result") if isinstance(payload.get("avatar_result"), dict) else {}
+    avatar_ready = str(avatar_result.get("status") or "").strip().lower() == "done"
+    if "avatar_commentary" in enhancement_modes and avatar_ready:
+        avatar_path = _first_existing_runtime_path(payload.get("avatar_mp4"), file_only=True)
+        if avatar_path is not None:
+            return str(avatar_path)
+    legacy_ai_effect_path = _first_existing_runtime_path(payload.get("ai_effect_mp4"), file_only=True)
+    if legacy_ai_effect_path is not None:
+        return str(legacy_ai_effect_path)
+    packaged_path = _first_existing_runtime_path(payload.get("packaged_mp4"), file_only=True)
+    return str(packaged_path) if packaged_path is not None else ""
 
 
 def _load_job_smart_copy_publication_packaging(
@@ -11590,11 +11702,16 @@ def _load_matching_generation_task_publication_packaging(
     for task in tasks:
         if not isinstance(task, dict):
             continue
-        if str(task.get("status") or "").strip().lower() not in {"completed", "done", "success"}:
+        status = str(task.get("status") or "").strip().lower()
+        if status not in {"queued", "running", "completed", "done", "success", "manual_handoff", "blocked", "failed"}:
             continue
         if not _generation_task_matches_job_material(task, expected_keys):
             continue
         result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        if not result and isinstance(task.get("partial_result"), dict):
+            result = task.get("partial_result") or {}
+        if not result:
+            continue
         normalized = normalize_publication_packaging_payload(result, material_dir=str(material_dir))
         platforms = normalized.get("platforms") if isinstance(normalized, dict) and isinstance(normalized.get("platforms"), dict) else {}
         if platforms:
@@ -11898,13 +12015,9 @@ async def _load_latest_done_render_output(job_id: uuid.UUID, session: AsyncSessi
 
 _DOWNLOADABLE_RENDER_KEYS: tuple[tuple[str, str, str, bool], ...] = (
     ("packaged_mp4", "成片（包装版）", "video", True),
-    ("plain_mp4", "成片（素版）", "video", True),
-    ("avatar_mp4", "成片（数字人）", "video", True),
-    ("ai_effect_mp4", "成片（AI 效果）", "video", True),
+    ("enhanced_mp4", "成片（增强版）", "video", True),
     ("packaged_srt", "字幕（包装版）", "subtitle", True),
-    ("plain_srt", "字幕（素版）", "subtitle", True),
-    ("avatar_srt", "字幕（数字人）", "subtitle", True),
-    ("ai_effect_srt", "字幕（AI 效果）", "subtitle", True),
+    ("enhanced_srt", "字幕（增强版）", "subtitle", True),
     ("cover", "封面", "image", True),
 )
 
@@ -11939,6 +12052,10 @@ def _collect_downloadable_files(render_output: RenderOutput | None, payload: dic
 
     for key, label, kind, recommended in _DOWNLOADABLE_RENDER_KEYS:
         add_file(key, label, kind, payload.get(key), recommended=recommended)
+    if not any(item["id"] == "enhanced_mp4" for item in files):
+        add_file("enhanced_mp4", "成片（增强版）", "video", payload.get("avatar_mp4") or payload.get("ai_effect_mp4"))
+    if not any(item["id"] == "enhanced_srt" for item in files):
+        add_file("enhanced_srt", "字幕（增强版）", "subtitle", payload.get("avatar_srt") or payload.get("ai_effect_srt"))
 
     for index, value in enumerate(payload.get("cover_variants") or []):
         add_file(f"cover_variants:{index}", f"封面备选 {index + 1}", "image", value, recommended=False)
@@ -11953,14 +12070,10 @@ def _collect_downloadable_files(render_output: RenderOutput | None, payload: dic
 def _download_file_sort_key(file_id: str) -> tuple[int, str]:
     priority = {
         "packaged_mp4": 0,
-        "avatar_mp4": 1,
-        "ai_effect_mp4": 2,
-        "plain_mp4": 3,
-        "packaged_srt": 4,
-        "avatar_srt": 5,
-        "ai_effect_srt": 6,
-        "plain_srt": 7,
-        "cover": 8,
+        "enhanced_mp4": 1,
+        "packaged_srt": 2,
+        "enhanced_srt": 3,
+        "cover": 4,
     }
     if file_id.startswith("cover_variants:"):
         return (9, file_id)
@@ -11992,6 +12105,11 @@ def _resolve_download_variant_path(render_output: RenderOutput | None, payload: 
         if path is not None:
             return path
         raise HTTPException(status_code=404, detail="Rendered output file not found")
+    if variant == "enhanced":
+        path = _first_existing_download_path(payload.get("enhanced_mp4"), payload.get("avatar_mp4"), payload.get("ai_effect_mp4"))
+        if path is not None:
+            return path
+        raise HTTPException(status_code=404, detail="Enhanced rendered output not found")
 
     plain_path = _first_existing_download_path(payload.get("plain_mp4"))
     if plain_path is not None:
@@ -14802,6 +14920,21 @@ def _select_preview_artifact(artifacts: list[Artifact]) -> Artifact | None:
 
 
 async def _resolve_job_open_target(job: Job, session: AsyncSession) -> tuple[str | None, str]:
+    render_outputs_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job.id,
+        artifact_types=("render_outputs",),
+    )
+    render_outputs_data = getattr(render_outputs_artifact, "data_json", None)
+    render_outputs_payload = render_outputs_data if isinstance(render_outputs_data, dict) else {}
+    preferred_artifact_output = _preferred_job_publication_media_path(
+        job=job,
+        render_outputs_payload=render_outputs_payload,
+    )
+    target_path = _resolve_file_manager_existing_path(preferred_artifact_output)
+    if target_path is not None and can_open_in_file_manager(target_path):
+        return str(target_path), "output"
+
     render_result = await session.execute(
         select(RenderOutput)
         .where(RenderOutput.job_id == job.id, RenderOutput.output_path.is_not(None))

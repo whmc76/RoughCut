@@ -368,6 +368,7 @@ def orchestrator(poll_interval: float):
 @click.option("--copy-style", default=None)
 @click.option("--platform", "platforms", multiple=True)
 @click.option("--use-existing-cover/--no-use-existing-cover", default=False)
+@click.option("--force-regenerate/--reuse-existing-materials", default=False)
 @click.option("--creator-profile-id", default=None)
 @click.option("--creator-profile-name", default=None)
 def intelligent_copy_task_runner(
@@ -376,6 +377,7 @@ def intelligent_copy_task_runner(
     copy_style: str | None,
     platforms: tuple[str, ...],
     use_existing_cover: bool,
+    force_regenerate: bool,
     creator_profile_id: str | None,
     creator_profile_name: str | None,
 ):
@@ -388,6 +390,7 @@ def intelligent_copy_task_runner(
         copy_style,
         list(platforms) or None,
         use_existing_cover,
+        force_regenerate,
         creator_profile_id,
         creator_profile_name,
     )

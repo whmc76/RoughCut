@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -223,7 +224,7 @@ async def test_resolve_job_publication_platform_options_derives_scheme_from_job_
     monkeypatch.setattr(jobs_api, "build_publication_plan", fake_build_publication_plan)
     monkeypatch.setattr(jobs_api, "generate_publication_scheme", fake_generate_publication_scheme)
 
-    async def fake_empty_profile_options(session, job):
+    async def fake_empty_profile_options(session, job, **kwargs):
         return {}
 
     monkeypatch.setattr(jobs_api, "_job_agent_publication_profile_options", fake_empty_profile_options)
@@ -247,6 +248,150 @@ async def test_resolve_job_publication_platform_options_derives_scheme_from_job_
     assert seen["generate_publication_scheme"]["folder_path"] == (
         r"\\Z4pro-gwil\团队文件-媒体工作台\EDC系列\待发布\MAXACE 美杜莎4 顶配次顶配开箱"
     )
+
+
+def test_job_publication_packaging_merges_completed_generation_task_platforms(monkeypatch, tmp_path) -> None:
+    project_root = tmp_path / "project"
+    task_store = project_root / "data" / "intelligent_copy" / "generation_tasks.json"
+    task_store.parent.mkdir(parents=True)
+    material_dir = tmp_path / "output" / "smart-copy"
+    material_dir.mkdir(parents=True)
+    task_store.write_text(
+        json.dumps(
+            {
+                "tasks": [
+                    {
+                        "status": "completed",
+                        "material_dir": str(material_dir),
+                        "inspection": {"material_dir": str(material_dir), "folder_path": str(material_dir.parent)},
+                        "result": {
+                            "material_dir": str(material_dir),
+                            "platforms": [
+                                {"key": "douyin", "primary_title": "抖音", "body": "正文", "tags": [], "cover_path": "dy.jpg"},
+                                {"key": "bilibili", "primary_title": "B站", "body": "正文", "tags": [], "cover_path": "b.jpg"},
+                                {"key": "youtube", "primary_title": "YT", "body": "正文", "tags": [], "cover_path": "yt.jpg"},
+                                {"key": "kuaishou", "primary_title": "快手", "body": "正文", "tags": [], "cover_path": "ks.jpg"},
+                                {"key": "xiaohongshu", "primary_title": "小红书", "body": "正文", "tags": [], "cover_path": "xhs.jpg"},
+                                {"key": "toutiao", "primary_title": "头条", "body": "正文", "tags": [], "cover_path": "tt.jpg"},
+                            ],
+                        },
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(jobs_api, "DEFAULT_PROJECT_ROOT", project_root)
+
+    packaging = {
+        "platforms": {
+            "douyin": {"primary_title": "当前抖音", "body": "正文", "tags": [], "cover_path": "current-dy.jpg"},
+            "bilibili": {"primary_title": "当前B站", "body": "正文", "tags": [], "cover_path": "current-b.jpg"},
+            "youtube": {"primary_title": "当前YT", "body": "正文", "tags": [], "cover_path": "current-yt.jpg"},
+        }
+    }
+
+    merged = jobs_api._merge_job_generation_task_publication_packaging(
+        packaging,
+        material_dir=material_dir,
+        job=SimpleNamespace(source_name="source.mp4", output_dir=str(material_dir.parent), source_path=""),
+        render_output=SimpleNamespace(output_path=str(material_dir.parent / "output.mp4")),
+    )
+
+    platforms = merged["platforms"]
+    assert list(platforms) == ["douyin", "bilibili", "youtube", "kuaishou", "xiaohongshu", "toutiao"]
+    assert platforms["douyin"]["primary_title"] == "当前抖音"
+    assert platforms["kuaishou"]["primary_title"] == "快手"
+
+
+def test_job_smart_copy_packaging_discovers_full_material_dir(monkeypatch, tmp_path) -> None:
+    project_root = tmp_path / "project"
+    current_material_dir = tmp_path / "current" / "smart-copy"
+    current_material_dir.mkdir(parents=True)
+    (current_material_dir / "platform-packaging.json").write_text(
+        json.dumps(
+            {
+                "platforms": {
+                    "douyin": {"primary_title": "抖音", "body": "正文", "tags": [], "cover_path": "dy.jpg"},
+                    "bilibili": {"primary_title": "B站", "body": "正文", "tags": [], "cover_path": "b.jpg"},
+                    "youtube": {"primary_title": "YT", "body": "正文", "tags": [], "cover_path": "yt.jpg"},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    discovered_material_dir = project_root / "data" / "runtime" / "output" / "20260618_BOLTBOAT_影蚀_EDC机能包功能演示" / "smart-copy"
+    discovered_material_dir.mkdir(parents=True)
+    (discovered_material_dir / "platform-packaging.json").write_text(
+        json.dumps(
+            {
+                "platforms": {
+                    "douyin": {"primary_title": "抖音", "body": "正文", "tags": [], "cover_path": "dy.jpg"},
+                    "bilibili": {"primary_title": "B站", "body": "正文", "tags": [], "cover_path": "b.jpg"},
+                    "youtube": {"primary_title": "YT", "body": "正文", "tags": [], "cover_path": "yt.jpg"},
+                    "kuaishou": {"primary_title": "快手", "body": "正文", "tags": [], "cover_path": "ks.jpg"},
+                    "xiaohongshu": {"primary_title": "小红书", "body": "正文", "tags": [], "cover_path": "xhs.jpg"},
+                    "toutiao": {"primary_title": "头条", "body": "正文", "tags": [], "cover_path": "tt.jpg"},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(jobs_api, "DEFAULT_PROJECT_ROOT", project_root)
+    monkeypatch.setattr(jobs_api, "_derive_job_publication_folder_path", lambda _job, _render_output: str(current_material_dir.parent))
+
+    packaging = jobs_api._load_job_smart_copy_publication_packaging(
+        job=SimpleNamespace(source_name="IMG_0185 HSJUN BOLTBOAT 影蚀 机能单肩包.MOV", task_brief="", output_dir="", source_path=""),
+        render_output=SimpleNamespace(output_path=str(current_material_dir.parent / "output.mp4")),
+    )
+
+    assert sorted(packaging["platforms"]) == ["bilibili", "douyin", "kuaishou", "toutiao", "xiaohongshu", "youtube"]
+
+
+def test_frontend_local_image_path_uses_publication_cover_resolver(monkeypatch, tmp_path) -> None:
+    cover = tmp_path / "cover.jpg"
+    cover.write_bytes(b"jpg")
+    monkeypatch.setattr(intelligent_copy_api, "resolve_publication_local_cover_path", lambda _path: cover)
+
+    assert intelligent_copy_api._resolve_frontend_local_image_path(r"\\host\share\cover.jpg") == cover
+
+
+@pytest.mark.asyncio
+async def test_resolve_job_publication_platform_options_fast_plan_skips_dynamic_scheme(monkeypatch) -> None:
+    async def fake_generate_publication_scheme(**kwargs):
+        raise AssertionError("fast publication plan should not probe or generate a dynamic scheme")
+
+    def fake_build_publication_plan(**kwargs):
+        raise AssertionError("fast publication plan should not build a nested dynamic base plan")
+
+    async def fake_profile_options(session, job, **kwargs):
+        assert kwargs["resolve_dynamic_strategy"] is False
+        return {
+            "douyin": {
+                "category": "随拍",
+            }
+        }
+
+    monkeypatch.setattr(jobs_api, "generate_publication_scheme", fake_generate_publication_scheme)
+    monkeypatch.setattr(jobs_api, "build_publication_plan", fake_build_publication_plan)
+    monkeypatch.setattr(jobs_api, "_job_agent_publication_profile_options", fake_profile_options)
+
+    result = await jobs_api._resolve_job_publication_platform_options(
+        session=None,
+        job=SimpleNamespace(source_path="E:/videos/source.mp4", output_dir=None),
+        render_output=None,
+        packaging={"platforms": {"douyin": {"primary_title": "测试标题"}}},
+        creator_profile={"id": "creator-1"},
+        existing_attempts=[],
+        requested_platforms=["douyin"],
+        requested_platform_options=None,
+        resolve_dynamic_options=False,
+    )
+
+    assert result == {"douyin": {"category": "随拍"}}
 
 
 @pytest.mark.asyncio
@@ -291,7 +436,7 @@ async def test_resolve_job_publication_platform_options_merges_creator_publicati
             }
         }
 
-    async def fake_profile_options(session, job):
+    async def fake_profile_options(session, job, **kwargs):
         return {
             "bilibili": {
                 "category": "生活兴趣/户外潮流",

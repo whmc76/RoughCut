@@ -444,6 +444,14 @@ export function JobUploadPanel({
               onChange={(event) => onChange({ ...upload, language: event.target.value })}
               options={languageOptions}
             />
+            {agentMode ? (
+              <CheckboxField
+                className="job-upload-publication-material-option"
+                label="自动生成发布物料"
+                checked={upload.autoGeneratePublicationMaterials}
+                onChange={(event) => onChange({ ...upload, autoGeneratePublicationMaterials: event.target.checked })}
+              />
+            ) : null}
             {!agentMode ? (
               <>
                 <SelectField

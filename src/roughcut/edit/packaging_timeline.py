@@ -33,15 +33,19 @@ def _normalize_packaging_timeline_payload(payload: dict[str, Any] | None) -> dic
         },
         "editing_accents": copy.deepcopy(source.get("editing_accents") or {}),
     }
+    if isinstance(source.get("chapter_analysis"), dict) and source.get("chapter_analysis"):
+        normalized["chapter_analysis"] = copy.deepcopy(source.get("chapter_analysis") or {})
+    if isinstance(source.get("hyperframes_options"), dict) and source.get("hyperframes_options"):
+        normalized["hyperframes_options"] = copy.deepcopy(source.get("hyperframes_options") or {})
     if isinstance(source.get("focus"), dict) and source.get("focus"):
         normalized["focus"] = copy.deepcopy(source.get("focus") or {})
-    normalized["hyperframes"] = copy.deepcopy(hyperframes_plan) if hyperframes_plan else build_static_packaging_plan(
-        subtitles_plan=normalized["subtitles"],
-        editing_accents=normalized["editing_accents"],
-        focus_plan=normalized.get("focus") if isinstance(normalized.get("focus"), dict) else None,
-        audio_cues=[],
-        source="roughcut.edit.packaging_timeline",
-    )
+    if hyperframes_plan:
+        normalized["hyperframes"] = copy.deepcopy(hyperframes_plan)
+    else:
+        normalized["hyperframes"] = _build_static_hyperframes_from_packaging_timeline(
+            normalized,
+            source="roughcut.edit.packaging_timeline.normalize",
+        )
     return normalized
 
 
@@ -61,19 +65,19 @@ def build_packaging_timeline_payload(render_plan: dict[str, Any] | None) -> dict
         },
         "editing_accents": copy.deepcopy(payload.get("editing_accents") or {}),
     }
+    if isinstance(payload.get("chapter_analysis"), dict) and payload.get("chapter_analysis"):
+        normalized["chapter_analysis"] = copy.deepcopy(payload.get("chapter_analysis") or {})
+    if isinstance(payload.get("hyperframes_options"), dict) and payload.get("hyperframes_options"):
+        normalized["hyperframes_options"] = copy.deepcopy(payload.get("hyperframes_options") or {})
     if isinstance(payload.get("focus"), dict) and payload.get("focus"):
         normalized["focus"] = copy.deepcopy(payload.get("focus") or {})
-    normalized["hyperframes"] = (
-        copy.deepcopy(payload.get("hyperframes"))
-        if is_hyperframes_plan(payload.get("hyperframes"))
-        else build_static_packaging_plan(
-            subtitles_plan=normalized["subtitles"],
-            editing_accents=normalized["editing_accents"],
-            focus_plan=normalized.get("focus") if isinstance(normalized.get("focus"), dict) else None,
-            audio_cues=[],
-            source="roughcut.edit.render_plan",
+    if is_hyperframes_plan(payload.get("hyperframes")):
+        normalized["hyperframes"] = copy.deepcopy(payload.get("hyperframes"))
+    else:
+        normalized["hyperframes"] = _build_static_hyperframes_from_packaging_timeline(
+            normalized,
+            source="roughcut.edit.packaging_timeline.build",
         )
-    )
     return normalized
 
 
@@ -84,7 +88,16 @@ def resolve_packaging_timeline_payload(payload: dict[str, Any] | None) -> dict[s
         return _normalize_packaging_timeline_payload(packaging_timeline)
     if any(
         key in source
-        for key in ("timeline_analysis", "editing_skill", "section_choreography", "subtitles", "packaging", "editing_accents")
+        for key in (
+            "timeline_analysis",
+            "editing_skill",
+            "section_choreography",
+            "chapter_analysis",
+            "hyperframes_options",
+            "subtitles",
+            "packaging",
+            "editing_accents",
+        )
     ):
         return _normalize_packaging_timeline_payload(source)
     return _normalize_packaging_timeline_payload(
@@ -92,6 +105,8 @@ def resolve_packaging_timeline_payload(payload: dict[str, Any] | None) -> dict[s
             "timeline_analysis": source.get("timeline_analysis"),
             "editing_skill": source.get("editing_skill"),
             "section_choreography": source.get("section_choreography"),
+            "chapter_analysis": source.get("chapter_analysis"),
+            "hyperframes_options": source.get("hyperframes_options"),
             "subtitles": source.get("subtitles"),
             "editing_accents": source.get("editing_accents"),
             "packaging": {
@@ -115,6 +130,14 @@ def packaging_timeline_editing_skill(payload: dict[str, Any] | None) -> dict[str
 
 def packaging_timeline_section_choreography(payload: dict[str, Any] | None) -> dict[str, Any]:
     return dict(resolve_packaging_timeline_payload(payload).get("section_choreography") or {})
+
+
+def packaging_timeline_chapter_analysis(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return dict(resolve_packaging_timeline_payload(payload).get("chapter_analysis") or {})
+
+
+def packaging_timeline_hyperframes_options(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return dict(resolve_packaging_timeline_payload(payload).get("hyperframes_options") or {})
 
 
 def packaging_timeline_subtitles(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -157,13 +180,49 @@ def packaging_timeline_editing_accents(payload: dict[str, Any] | None) -> dict[s
 
 def packaging_timeline_hyperframes(payload: dict[str, Any] | None) -> dict[str, Any]:
     plan = resolve_packaging_timeline_payload(payload).get("hyperframes")
-    return copy.deepcopy(plan) if is_hyperframes_plan(plan) else build_static_packaging_plan(
-        subtitles_plan=packaging_timeline_subtitles(payload),
-        editing_accents=packaging_timeline_editing_accents(payload),
-        focus_plan=packaging_timeline_focus_plan(payload),
-        audio_cues=packaging_timeline_local_audio_cues(payload),
+    return copy.deepcopy(plan) if is_hyperframes_plan(plan) else _build_static_hyperframes_from_packaging_timeline(
+        resolve_packaging_timeline_payload(payload),
         source="roughcut.edit.packaging_timeline",
     )
+
+
+def _build_static_hyperframes_from_packaging_timeline(
+    payload: dict[str, Any],
+    *,
+    source: str,
+) -> dict[str, Any]:
+    return build_static_packaging_plan(
+        subtitles_plan=payload.get("subtitles") if isinstance(payload.get("subtitles"), dict) else None,
+        editing_accents=payload.get("editing_accents") if isinstance(payload.get("editing_accents"), dict) else None,
+        focus_plan=payload.get("focus") if isinstance(payload.get("focus"), dict) else None,
+        chapter_analysis=payload.get("chapter_analysis") if isinstance(payload.get("chapter_analysis"), dict) else None,
+        audio_cues=_local_audio_cues_from_normalized_payload(payload),
+        options=payload.get("hyperframes_options") if isinstance(payload.get("hyperframes_options"), dict) else None,
+        source=source,
+    )
+
+
+def _local_audio_cues_from_normalized_payload(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    packaging = payload.get("packaging") if isinstance(payload.get("packaging"), dict) else {}
+    music_plan = normalize_local_music_plan(packaging.get("music"))
+    music_cues = [
+        dict(item)
+        for item in list((music_plan or {}).get("audio_cues") or [])
+        if isinstance(item, dict)
+    ]
+    editing_accents = payload.get("editing_accents") if isinstance(payload.get("editing_accents"), dict) else {}
+    sound_effects = [
+        {
+            "kind": "sfx_overlay",
+            "time_sec": round(float(item.get("start_time", 0.0) or 0.0), 3),
+            "duration_sec": round(float(item.get("duration_sec", 0.0) or 0.0), 3),
+            "frequency": float(item.get("frequency", 0.0) or 0.0),
+            "volume": float(item.get("volume", 0.0) or 0.0),
+        }
+        for item in list((editing_accents or {}).get("sound_effects") or [])
+        if isinstance(item, dict)
+    ]
+    return [*music_cues, *sound_effects]
 
 
 def packaging_timeline_focus_plan(payload: dict[str, Any] | None) -> dict[str, Any] | None:

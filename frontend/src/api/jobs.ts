@@ -15,6 +15,7 @@ import type {
   JobTimeline,
   JobsUsageSummary,
   JobsUsageTrend,
+  IntelligentCopyGenerateTask,
   PublicationPlan,
   PublicationPlatformPublishOptions,
   Report,
@@ -149,7 +150,10 @@ export const jobsApi = {
     creatorCardId?: string,
     taskBrief?: string,
     executionMode?: string,
+    autoGeneratePublicationMaterials = false,
     platformTargets: string[] = [],
+    translationTargetLanguage = "auto",
+    startMode: "manual" | "immediate" = "immediate",
   ) => {
     const formData = new FormData();
     files.forEach((file) => formData.append("files", file));
@@ -162,10 +166,15 @@ export const jobsApi = {
     if (creatorCardId) formData.append("creator_card_id", creatorCardId);
     if (taskBrief?.trim()) formData.append("task_brief", taskBrief.trim());
     if (executionMode) formData.append("execution_mode", executionMode);
+    formData.append("auto_generate_publication_materials", autoGeneratePublicationMaterials ? "true" : "false");
     formData.append("smart_cut_rule_reasons", JSON.stringify(selectedSmartCutRuleReasons));
     formData.append("material_enhancement_modes", JSON.stringify(materialEnhancementModes));
     formData.append("agent_capability_keys", JSON.stringify(selectedAgentCapabilityKeys));
     formData.append("hyperframes_options", JSON.stringify(hyperframesOptions));
+    formData.append("start_mode", startMode);
+    if (enhancementModes.includes("multilingual_translation")) {
+      formData.append("translation_target_language", translationTargetLanguage || "auto");
+    }
     platformTargets.forEach((platform) => formData.append("platform_targets", platform));
     enhancementModes.forEach((mode) => formData.append("enhancement_modes", mode));
     return requestForm<Job>("/jobs", formData);
@@ -223,9 +232,19 @@ export const jobsApi = {
       creator_profile_id?: string | null;
       platforms?: string[];
       platform_options?: Record<string, PublicationPlatformPublishOptions>;
+      force_regenerate?: boolean;
     },
   ) =>
     request<PublicationPlan>(`/jobs/${jobId}/publication/materials`, { method: "POST", body: JSON.stringify(body) }),
+  createJobPublicationMaterialTask: (
+    jobId: string,
+    body: {
+      creator_profile_id?: string | null;
+      platforms?: string[];
+      platform_options?: Record<string, PublicationPlatformPublishOptions>;
+    },
+  ) =>
+    request<IntelligentCopyGenerateTask>(`/jobs/${jobId}/publication/material-tasks`, { method: "POST", body: JSON.stringify(body) }),
   publishJob: (
     jobId: string,
     body: {
@@ -264,6 +283,6 @@ export const jobsApi = {
   downloadJobFiles: requestDownloadZip,
   cancelJob: (jobId: string) => request<Job>(`/jobs/${jobId}/cancel`, { method: "POST" }),
   restartJob: (jobId: string) => request<Job>(`/jobs/${jobId}/restart`, { method: "POST" }),
-  deleteJob: (jobId: string) => request<void>(`/jobs/${jobId}`, { method: "DELETE" }),
+  deleteJob: (jobId: string) => request<void>(`/jobs/${jobId}?include_family=true`, { method: "DELETE" }),
   openJobFolder: (jobId: string) => request<{ path: string; kind: string }>(`/jobs/${jobId}/open-folder`, { method: "POST" }),
 };

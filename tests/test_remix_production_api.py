@@ -111,6 +111,69 @@ def test_job_publication_folder_prefers_render_output_over_windows_source_path()
     assert not folder_path.startswith("F:")
 
 
+def test_job_publication_render_output_prefers_unified_enhanced_variant(tmp_path) -> None:
+    packaged = tmp_path / "sample_成片.mp4"
+    enhanced = tmp_path / "sample_增强版.mp4"
+    packaged.write_bytes(b"packaged")
+    enhanced.write_bytes(b"enhanced")
+    job = Job(enhancement_modes=["ai_effects", "avatar_commentary"])
+    render_output = SimpleNamespace(output_path=str(packaged), status="done", progress=1.0)
+
+    selected = jobs_api._select_job_publication_render_output(
+        job,
+        render_output,
+        {
+            "packaged_mp4": str(packaged),
+            "enhanced_mp4": str(enhanced),
+            "avatar_result": {"status": "done"},
+        },
+    )
+
+    assert selected.output_path == str(enhanced.resolve())
+
+
+def test_job_publication_render_output_keeps_legacy_avatar_fallback(tmp_path) -> None:
+    packaged = tmp_path / "sample_成片.mp4"
+    avatar = tmp_path / "sample_数字人版.mp4"
+    packaged.write_bytes(b"packaged")
+    avatar.write_bytes(b"avatar")
+    job = Job(enhancement_modes=["ai_effects", "avatar_commentary"])
+    render_output = SimpleNamespace(output_path=str(packaged), status="done", progress=1.0)
+
+    selected = jobs_api._select_job_publication_render_output(
+        job,
+        render_output,
+        {
+            "packaged_mp4": str(packaged),
+            "avatar_mp4": str(avatar),
+            "avatar_result": {"status": "done"},
+        },
+    )
+
+    assert selected.output_path == str(avatar.resolve())
+
+
+def test_job_publication_render_output_keeps_packaged_when_avatar_not_ready(tmp_path) -> None:
+    packaged = tmp_path / "sample_成片.mp4"
+    avatar = tmp_path / "sample_数字人版.mp4"
+    packaged.write_bytes(b"packaged")
+    avatar.write_bytes(b"avatar")
+    job = Job(enhancement_modes=["ai_effects", "avatar_commentary"])
+    render_output = SimpleNamespace(output_path=str(packaged), status="done", progress=1.0)
+
+    selected = jobs_api._select_job_publication_render_output(
+        job,
+        render_output,
+        {
+            "packaged_mp4": str(packaged),
+            "avatar_mp4": str(avatar),
+            "avatar_result": {"status": "degraded"},
+        },
+    )
+
+    assert selected is render_output
+
+
 def test_done_publication_job_without_pipeline_steps_reports_complete_progress() -> None:
     job = Job(
         status="done",
@@ -141,6 +204,29 @@ def test_attach_remix_task_job_state_exposes_frontend_progress_percent() -> None
 
     assert item["job_progress_percent"] == 100
     assert item["progress_percent"] == 100
+
+
+def test_default_remix_manifest_discovers_creator_binding(tmp_path, monkeypatch) -> None:
+    project_root = tmp_path / "project"
+    manifest = project_root / "data" / "remix_production_tasks" / "creator_pending.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"schema":"roughcut.remix.production_tasks.v1","tasks":[]}', encoding="utf-8")
+    profile_dir = project_root / "data" / "creator_profiles"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "creator.json").write_text(
+        """
+        {
+          "remix_task_bindings": [
+            {"production_manifest_path": "data/remix_production_tasks/creator_pending.json"}
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(jobs_api, "DEFAULT_PROJECT_ROOT", project_root)
+    monkeypatch.delenv(jobs_api.DEFAULT_REMIX_PRODUCTION_MANIFEST_ENV, raising=False)
+
+    assert jobs_api._resolve_remix_production_manifest_path(None) == manifest.resolve()
 
 
 def test_refresh_existing_remix_job_metadata_restores_source_context() -> None:

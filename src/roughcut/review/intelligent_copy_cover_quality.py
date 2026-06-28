@@ -248,6 +248,8 @@ def _check_output_path_matches_request(
     recorded_path = Path(recorded)
     if trusted_master_output_path is not None and recorded_path == trusted_master_output_path:
         return
+    if _paths_refer_to_same_materialized_smart_copy_file(recorded_path, output_path):
+        return
     if recorded_path != output_path:
         blocking_reasons.append(f"封面请求 output_path 与待发布文件不一致：{recorded} != {output_path}")
 
@@ -265,8 +267,22 @@ def _check_output_path_matches_metadata(
     recorded_path = Path(recorded)
     if trusted_master_output_path is not None and recorded_path == trusted_master_output_path:
         return
+    if _paths_refer_to_same_materialized_smart_copy_file(recorded_path, output_path):
+        return
     if recorded_path != output_path:
         blocking_reasons.append(f"封面生成元数据 output_path 与待发布文件不一致：{recorded} != {output_path}")
+
+
+def _paths_refer_to_same_materialized_smart_copy_file(left: Path, right: Path) -> bool:
+    left_text = str(left).replace("\\", "/")
+    right_text = str(right).replace("\\", "/")
+    if left_text == right_text:
+        return True
+    if "/smart-copy/" not in left_text or "/smart-copy/" not in right_text:
+        return False
+    if {"/host-intelligent-copy/" in left_text, "/host-intelligent-copy/" in right_text} != {False, True}:
+        return False
+    return left_text.split("/smart-copy/", 1)[1] == right_text.split("/smart-copy/", 1)[1]
 
 
 def _check_stale_output(

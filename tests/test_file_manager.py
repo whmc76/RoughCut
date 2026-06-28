@@ -219,3 +219,46 @@ def test_job_open_target_prefers_runtime_mount_path_for_host_runtime_output(tmp_
 
     assert Path(target_path) == target.resolve()
     assert kind == "output"
+
+
+def test_job_open_target_prefers_render_outputs_artifact_final_media_over_source(tmp_path, monkeypatch) -> None:
+    source_dir = tmp_path / "jobs" / "job-1"
+    source_dir.mkdir(parents=True)
+    source_path = source_dir / "source.mov"
+    source_path.write_bytes(b"source")
+    output_dir = tmp_path / "host-intelligent-copy" / "job-1"
+    output_dir.mkdir(parents=True)
+    packaged_path = output_dir / "final.mp4"
+    packaged_path.write_bytes(b"packaged")
+    avatar_path = output_dir / "final-avatar.mp4"
+    avatar_path.write_bytes(b"avatar")
+
+    async def fake_load_latest_optional_artifact(*_args, **_kwargs):
+        return SimpleNamespace(
+            data_json={
+                "packaged_mp4": str(packaged_path),
+                "avatar_mp4": str(avatar_path),
+                "avatar_result": {"status": "done"},
+            }
+        )
+
+    class FailSession:
+        async def execute(self, _statement):
+            raise AssertionError("render_outputs artifact should resolve the open target before source fallback")
+
+    monkeypatch.setattr(jobs_api, "_load_latest_optional_artifact", fake_load_latest_optional_artifact)
+    monkeypatch.setattr(jobs_api, "can_open_in_file_manager", lambda path: Path(path).exists())
+
+    target_path, kind = asyncio.run(
+        jobs_api._resolve_job_open_target(
+            SimpleNamespace(
+                id=uuid.uuid4(),
+                source_path=str(source_path),
+                enhancement_modes=["avatar_commentary"],
+            ),
+            FailSession(),
+        )
+    )
+
+    assert Path(target_path) == avatar_path.resolve()
+    assert kind == "output"

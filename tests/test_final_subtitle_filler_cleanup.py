@@ -5,6 +5,7 @@ import pytest
 
 from roughcut.media.output import write_srt_file
 from roughcut.media.subtitles import split_subtitle_display_item, split_subtitle_display_text, write_ass_file
+from roughcut.pipeline.quality import _parse_srt_timeline, _subtitle_timing_structure_diagnostics
 from roughcut.media.subtitle_text import (
     clean_final_subtitle_text,
     clean_subtitle_payloads,
@@ -372,6 +373,35 @@ def test_write_srt_file_splits_overlong_display_cues(tmp_path: Path) -> None:
     content = output_path.read_text(encoding="utf-8-sig")
     assert "1\n00:00:00,000" in content
     assert "2\n" in content
+
+
+def test_write_srt_file_merges_short_flash_fragments_from_display_split(tmp_path: Path) -> None:
+    output_path = tmp_path / "subtitle.srt"
+
+    write_srt_file(
+        [
+            {
+                "start_time": 609.061,
+                "end_time": 611.649,
+                "text_final": "日常场景啊真正的使用一次你才能理解到它到底有多么的实用和优秀嗯虽然它不如",
+            },
+            {
+                "start_time": 611.649,
+                "end_time": 614.022,
+                "text_final": "我们这些机能包啊那么花里胡哨啊呃当然它这个纯黑肯定也会有很多人喜欢",
+            },
+        ],
+        output_path,
+    )
+
+    timeline = _parse_srt_timeline(output_path)
+    diagnostics = _subtitle_timing_structure_diagnostics(timeline["ranges"], video_duration_sec=620.708)
+    content = output_path.read_text(encoding="utf-8-sig")
+
+    assert diagnostics["short_flash_count"] == 0
+    assert diagnostics["abrupt_flash_count"] == 0
+    assert "\n然它不如\n" not in content
+    assert "\n欢\n" not in content
 
 
 def test_write_ass_file_skips_filler_only_dialogues(tmp_path: Path) -> None:

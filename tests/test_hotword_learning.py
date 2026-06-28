@@ -11,6 +11,7 @@ from roughcut.review.hotword_learning import (
 )
 from roughcut.pipeline.steps import _build_effective_glossary_terms, _infer_subject_domain_for_memory
 from roughcut.review.domain_glossaries import detect_glossary_domains
+from roughcut.review.entity_catalog import list_builtin_entity_catalog
 from roughcut.review.subtitle_memory import (
     apply_domain_term_corrections,
     build_subtitle_review_memory,
@@ -121,6 +122,53 @@ def test_source_name_edc_identity_terms_are_frontloaded_in_transcription_prompt(
     assert "欧气" in hotwords
     assert len(hotwords) <= 12
     assert len(prompt) <= 320
+
+
+def test_builtin_knife_terms_include_huhe_brand_and_satin_finish_hotwords() -> None:
+    source_name = "呼和 缎面研磨 折刀开箱.mp4"
+    content_profile = {
+        "subject_brand": "呼和",
+        "subject_type": "EDC折刀",
+        "subject_domain": "knife",
+    }
+    subject_domain = _infer_subject_domain_for_memory(
+        workflow_template="edc_tactical",
+        content_profile=content_profile,
+        source_name=source_name,
+    )
+    effective_terms = _build_effective_glossary_terms(
+        glossary_terms=[],
+        workflow_template="edc_tactical",
+        content_profile=content_profile,
+        source_name=source_name,
+        subject_domain=subject_domain,
+    )
+    review_memory = build_subtitle_review_memory(
+        workflow_template="edc_tactical",
+        subject_domain=subject_domain,
+        source_name=source_name,
+        glossary_terms=effective_terms,
+        user_memory={},
+        recent_subtitles=[],
+        content_profile=content_profile,
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+    prompt = build_transcription_prompt(
+        source_name=source_name,
+        workflow_template="edc_tactical",
+        review_memory=review_memory,
+        dialect_profile="mandarin",
+        content_profile=content_profile,
+    )
+
+    term_forms = {str(term.get("correct_form") or "") for term in effective_terms}
+    entity_brands = {str(item.get("brand") or "") for item in list_builtin_entity_catalog(subject_domain="knife")}
+    hotwords = extract_prompt_hotwords(prompt)
+
+    assert {"呼和", "折刀", "缎面", "缎面研磨"}.issubset(term_forms)
+    assert "呼和" in entity_brands
+    assert {"呼和", "折刀", "缎面研磨"}.issubset(hotwords)
 
 
 def test_learned_hotwords_without_current_evidence_are_not_prompted() -> None:

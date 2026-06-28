@@ -4087,14 +4087,21 @@ async def infer_content_profile(
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_path = Path(tmpdir)
+            try:
+                from roughcut.media.rotation import detect_video_rotation_decision
+
+                orientation_decision = (await detect_video_rotation_decision(source_path)).to_dict()
+            except Exception:
+                orientation_decision = {}
             targeted_frame_paths = _extract_asr_guided_visual_probe_frames(
                 source_path,
                 tmp_path,
                 subtitle_items=subtitle_items,
+                orientation_decision=orientation_decision,
             )
             frame_paths = [
                 *targeted_frame_paths,
-                *_extract_reference_frames(source_path, tmp_path, count=24),
+                *_extract_reference_frames(source_path, tmp_path, count=24, orientation_decision=orientation_decision),
             ]
             if bool(getattr(settings, "ocr_enabled", False)):
                 ocr_profile = await _collect_content_profile_ocr(frame_paths, source_name=source_name)
@@ -8004,7 +8011,13 @@ async def _generate_engagement_question(
         return None
 
 
-def _extract_reference_frames(source_path: Path, tmpdir: Path, *, count: int) -> list[Path]:
+def _extract_reference_frames(
+    source_path: Path,
+    tmpdir: Path,
+    *,
+    count: int,
+    orientation_decision: dict[str, Any] | None = None,
+) -> list[Path]:
     import subprocess
 
     duration = _probe_duration(source_path)
@@ -8031,6 +8044,7 @@ def _extract_reference_frames(source_path: Path, tmpdir: Path, *, count: int) ->
                 f"{segment_start:.2f}",
                 "-t",
                 f"{segment_length:.2f}",
+                "-noautorotate",
                 "-i",
                 str(source_path),
                 "-frames:v",
@@ -8038,7 +8052,7 @@ def _extract_reference_frames(source_path: Path, tmpdir: Path, *, count: int) ->
                 "-q:v",
                 "3",
                 "-vf",
-                "thumbnail=90,scale=960:-2",
+                _content_profile_frame_video_filter(orientation_decision, "thumbnail=90", "scale=960:-2"),
                 str(out),
             ],
             capture_output=True,
@@ -8195,6 +8209,7 @@ def _extract_asr_guided_visual_probe_frames(
     *,
     subtitle_items: list[dict],
     max_windows: int = 8,
+    orientation_decision: dict[str, Any] | None = None,
 ) -> list[Path]:
     import subprocess
 
@@ -8221,6 +8236,7 @@ def _extract_asr_guided_visual_probe_frames(
                     "-y",
                     "-ss",
                     f"{seek:.2f}",
+                    "-noautorotate",
                     "-i",
                     str(source_path),
                     "-frames:v",
@@ -8230,7 +8246,7 @@ def _extract_asr_guided_visual_probe_frames(
                     "-q:v",
                     "3",
                     "-vf",
-                    "scale=960:-2",
+                    _content_profile_frame_video_filter(orientation_decision, "scale=960:-2"),
                     str(out),
                 ],
                 capture_output=True,
@@ -8239,6 +8255,15 @@ def _extract_asr_guided_visual_probe_frames(
             if result.returncode == 0 and out.exists():
                 frames.append(out)
     return frames
+
+
+def _content_profile_frame_video_filter(
+    orientation_decision: dict[str, Any] | None,
+    *extra_filters: str,
+) -> str:
+    from roughcut.media.rotation import build_orientation_video_filter
+
+    return build_orientation_video_filter(orientation_decision, *extra_filters)
 
 
 def _build_asr_guided_visual_probe_windows(

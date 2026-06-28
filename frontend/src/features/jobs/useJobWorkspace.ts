@@ -27,6 +27,7 @@ const EMPTY_UPLOAD: UploadForm = {
   },
   creatorCardId: "",
   executionMode: "auto",
+  autoGeneratePublicationMaterials: false,
   platformTargets: [],
   translationTargetLanguage: "auto",
   taskBrief: "",
@@ -242,6 +243,7 @@ type CreateTaskPreferenceValues = {
   hyperframesOptions?: Record<string, boolean>;
   creatorCardId?: string;
   executionMode?: string;
+  autoGeneratePublicationMaterials?: boolean;
   platformTargets?: string[];
   translationTargetLanguage?: string;
   outputDir?: string;
@@ -278,6 +280,10 @@ function readCreateTaskPreferenceValues(value: unknown): CreateTaskPreferenceVal
       : undefined,
     creatorCardId: String(payload.creatorCardId ?? "").trim() || undefined,
     executionMode: String(payload.executionMode ?? "").trim() || undefined,
+    autoGeneratePublicationMaterials:
+      typeof payload.autoGeneratePublicationMaterials === "boolean"
+        ? payload.autoGeneratePublicationMaterials
+        : undefined,
     platformTargets: Array.isArray(payload.platformTargets) ? normalizedUniqueStrings(payload.platformTargets) : undefined,
     translationTargetLanguage: normalizeTranslationTargetLanguage(payload.translationTargetLanguage),
     outputDir: String(payload.outputDir ?? "").trim() || undefined,
@@ -297,6 +303,7 @@ function createTaskPreferenceValuesFromUpload(upload: UploadForm): CreateTaskPre
     hyperframesOptions: upload.hyperframesOptions,
     creatorCardId: upload.creatorCardId,
     executionMode: upload.executionMode,
+    autoGeneratePublicationMaterials: upload.autoGeneratePublicationMaterials,
     platformTargets: upload.platformTargets,
     translationTargetLanguage: upload.translationTargetLanguage,
     outputDir: upload.outputDir,
@@ -655,6 +662,7 @@ export function useJobWorkspace({
           },
           creatorCardId: effectivePreferences.creatorCardId ?? EMPTY_UPLOAD.creatorCardId,
           executionMode: effectivePreferences.executionMode ?? EMPTY_UPLOAD.executionMode,
+          autoGeneratePublicationMaterials: effectivePreferences.autoGeneratePublicationMaterials ?? EMPTY_UPLOAD.autoGeneratePublicationMaterials,
           platformTargets: effectivePreferences.platformTargets ?? EMPTY_UPLOAD.platformTargets,
           translationTargetLanguage: effectivePreferences.translationTargetLanguage ?? EMPTY_UPLOAD.translationTargetLanguage,
           outputDir: effectivePreferences.outputDir ?? EMPTY_UPLOAD.outputDir,
@@ -873,6 +881,7 @@ export function useJobWorkspace({
         upload.creatorCardId || undefined,
         upload.taskBrief,
         upload.executionMode,
+        upload.autoGeneratePublicationMaterials,
         upload.platformTargets,
         upload.translationTargetLanguage,
         variables?.startMode ?? "immediate",

@@ -65,6 +65,7 @@ from roughcut.publication import (
     publication_plan_is_manual_handoff_ready,
     publication_plan_status,
     reconcile_publication_attempt_from_browser_agent_payload,
+    resolve_publication_local_cover_path,
     submit_publication_attempts,
 )
 from roughcut.publication_packaging import (
@@ -294,6 +295,7 @@ async def generate_folder_materials(body: IntelligentCopyGenerateIn):
             copy_style=body.copy_style,
             platforms=body.platforms,
             use_existing_cover=body.use_existing_cover,
+            force_regenerate=body.force_regenerate,
             creator_profile_id=str(body.creator_profile_id or "").strip() or None,
             creator_profile_name=str((creator_profile or {}).get("display_name") or "").strip() or None,
             creator_profile=creator_profile,
@@ -335,6 +337,7 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
         copy_style=body.copy_style,
         platforms=requested_platforms,
         use_existing_cover=body.use_existing_cover,
+        force_regenerate=body.force_regenerate,
         creator_profile_id=str(body.creator_profile_id or "").strip() or None,
     )
     if active_task is not None:
@@ -347,6 +350,7 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
         "folder_path": folder_path,
         "copy_style": str(body.copy_style or "").strip() or None,
         "use_existing_cover": bool(body.use_existing_cover),
+        "force_regenerate": bool(body.force_regenerate),
         "platforms": requested_platforms,
         "creator_profile_id": str(body.creator_profile_id or "").strip() or None,
         "creator_profile_name": str((creator_profile or {}).get("display_name") or "").strip() or None,
@@ -375,6 +379,7 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
         copy_style=body.copy_style,
         platforms=requested_platforms,
         use_existing_cover=body.use_existing_cover,
+        force_regenerate=body.force_regenerate,
         creator_profile_id=str(body.creator_profile_id or "").strip() or None,
         creator_profile_name=str((creator_profile or {}).get("display_name") or "").strip() or None,
     )
@@ -1028,6 +1033,7 @@ def _find_active_generation_task(
     copy_style: str | None,
     platforms: list[str] | None,
     use_existing_cover: bool,
+    force_regenerate: bool = False,
     creator_profile_id: str | None = None,
 ) -> dict[str, Any] | None:
     normalized_style = str(copy_style or "").strip()
@@ -1041,6 +1047,8 @@ def _find_active_generation_task(
         if _normalize_generation_platforms(item.get("platforms") or []) != normalized_platforms:
             continue
         if bool(item.get("use_existing_cover")) != bool(use_existing_cover):
+            continue
+        if bool(item.get("force_regenerate")) != bool(force_regenerate):
             continue
         if str(item.get("creator_profile_id") or "").strip() != normalized_creator_profile_id:
             continue
@@ -1170,6 +1178,7 @@ def _schedule_generation_task(
     copy_style: str | None,
     platforms: list[str] | None,
     use_existing_cover: bool,
+    force_regenerate: bool,
     creator_profile_id: str | None,
     creator_profile_name: str | None,
 ) -> None:
@@ -1184,6 +1193,8 @@ def _schedule_generation_task(
         folder_path,
         "--use-existing-cover" if use_existing_cover else "--no-use-existing-cover",
     ]
+    if force_regenerate:
+        command.append("--force-regenerate")
     if copy_style:
         command.extend(["--copy-style", str(copy_style)])
     for platform in platforms or []:
@@ -1223,6 +1234,7 @@ def _run_generation_task_thread(
     copy_style: str | None,
     platforms: list[str] | None,
     use_existing_cover: bool,
+    force_regenerate: bool,
     creator_profile_id: str | None,
     creator_profile_name: str | None,
 ) -> None:
@@ -1233,6 +1245,7 @@ def _run_generation_task_thread(
             copy_style=copy_style,
             platforms=platforms,
             use_existing_cover=use_existing_cover,
+            force_regenerate=force_regenerate,
             creator_profile_id=creator_profile_id,
             creator_profile_name=creator_profile_name,
         )
@@ -1246,6 +1259,7 @@ async def _run_generation_task(
     copy_style: str | None,
     platforms: list[str] | None,
     use_existing_cover: bool,
+    force_regenerate: bool,
     creator_profile_id: str | None,
     creator_profile_name: str | None,
 ) -> None:
@@ -1284,6 +1298,7 @@ async def _run_generation_task(
             copy_style=copy_style,
             platforms=platforms,
             use_existing_cover=use_existing_cover,
+            force_regenerate=force_regenerate,
             creator_profile_id=creator_profile_id,
             creator_profile_name=creator_profile_name,
             creator_profile=creator_profile,
@@ -1822,6 +1837,9 @@ def _resolve_frontend_local_image_path(raw_path: str) -> Path:
     text = str(raw_path or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="缺少图片路径。")
+    publication_cover_path = resolve_publication_local_cover_path(text)
+    if publication_cover_path is not None:
+        return publication_cover_path
     normalized = text.replace("\\", "/")
     container_prefix = "/app/data/"
     if normalized.startswith(container_prefix):

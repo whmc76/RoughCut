@@ -136,6 +136,8 @@ def normalize_avatar_capability_status(value: object) -> dict[str, str]:
     normalized: dict[str, str] = {}
     for raw_key, raw_status in value.items():
         key = normalize_avatar_capability_key(raw_key)
+        if key == "heygem_avatar":
+            key = AVATAR_CAPABILITY_GENERATION
         if key not in AVATAR_CAPABILITY_STATUS_KEYS:
             continue
         normalized[key] = str(raw_status or "").strip().lower() or "missing"

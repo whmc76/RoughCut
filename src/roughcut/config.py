@@ -323,6 +323,7 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "packaging_selection_min_score",
     "streamlined_asr_pipeline_enabled",
     "subtitle_filler_cleanup_enabled",
+    "render_subtitle_alignment_policy",
     "quality_auto_rerun_enabled",
     "quality_auto_rerun_below_score",
     "quality_auto_rerun_max_attempts",
@@ -582,6 +583,7 @@ class Settings(BaseSettings):
     preferred_ui_language: str = "zh-CN"
     output_name_pattern: str = "{date}_{stem}"  # {date}=YYYYMMDD, {stem}=original filename stem
     render_debug_dir: str = str((DEFAULT_OUTPUT_ROOT / "render-debug").as_posix())
+    render_subtitle_alignment_policy: str = "adaptive"  # adaptive | strict
     telegram_agent_enabled: bool = False
     telegram_agent_claude_enabled: bool = False
     telegram_agent_claude_command: str = "claude"

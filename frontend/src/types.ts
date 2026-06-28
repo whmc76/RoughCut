@@ -871,6 +871,8 @@ export type IntelligentCopyPlatformMaterial = {
   title_label: string;
   body_label: string;
   tag_label: string;
+  separate_tags?: boolean;
+  tags_embedded_in_body?: boolean;
   constraints: {
     title_limit: number;
     body_limit: number;
@@ -945,6 +947,7 @@ export type IntelligentCopyGenerateTask = {
   folder_path: string;
   copy_style?: string | null;
   use_existing_cover?: boolean;
+  force_regenerate?: boolean;
   status: "queued" | "running" | "completed" | "manual_handoff" | "blocked" | "failed" | string;
   progress: number;
   stage: string;
@@ -1105,6 +1108,14 @@ export type PublicationTarget = {
   adapter: string;
   execution_mode?: string | null;
   content_kind?: string | null;
+  has_title?: boolean;
+  title_label?: string | null;
+  body_label?: string | null;
+  tag_label?: string | null;
+  separate_tags?: boolean;
+  tags_embedded_in_body?: boolean;
+  constraints?: IntelligentCopyPlatformMaterial["constraints"] | Record<string, unknown> | null;
+  publish_projects?: Array<Record<string, unknown>>;
   title: string;
   titles?: string[];
   body: string;

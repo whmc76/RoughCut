@@ -357,6 +357,21 @@ export function JobDetailPanel({
     typeof currentStep?.progress === "number" ? Math.round(currentStep.progress * 100) : null;
   const agentPlanPayload = agentPlan?.plan_payload_json ?? {};
   const agentStages = Array.isArray(agentPlanPayload.stages) ? agentPlanPayload.stages : [];
+  const jobProgressPercent = Math.max(0, Math.min(100, Math.round(selectedJob?.progress_percent ?? 0)));
+  const completedStepCount = stepEntries.filter((step) => ["done", "completed", "success"].includes(step.status)).length;
+  const failedStepCount = stepEntries.filter((step) => ["failed", "cancelled"].includes(step.status)).length;
+  const activeStepCount = stepEntries.filter((step) => ["running", "processing"].includes(step.status)).length;
+  const pendingStepCount = Math.max(0, stepEntries.length - completedStepCount - failedStepCount - activeStepCount);
+  const currentStepSummary = currentStep
+    ? `${currentStep.label}${currentStepProgressPercent != null ? ` · ${currentStepProgressPercent}%` : ""}`
+    : "等待进入流程";
+  const executionModeSummary =
+    selectedJob?.execution_mode === "smart_assist"
+      ? "智能辅助"
+      : selectedJob?.execution_mode === "plan_first"
+        ? "先生成方案"
+        : "全自动";
+  const interventionSummary = isAwaitingManualEdit ? "等待手动调整" : isReviewMode ? "审核路径" : "无需介入";
 
   return (
     <aside className={classNames("panel detail-panel", className)}>
@@ -368,7 +383,7 @@ export function JobDetailPanel({
             title={selectedJob.source_name}
             description={selectedJob.id}
             actions={
-              <div className="form-stack compact-top">
+              <div className="job-detail-status-strip">
                 <span className={`status-chip ${jobStatusTone(selectedJob)}`}>{jobStatusLabel(selectedJob)}</span>
                 {selectedJob.publication_summary ? <span className="muted">{selectedJob.publication_summary}</span> : null}
                 {avatarHeadlineSummary ? (
@@ -382,19 +397,19 @@ export function JobDetailPanel({
 
           <div className="detail-actions">
             {showOpenFolder ? (
-              <button type="button" className="button ghost" onClick={onOpenFolder}>
+              <button type="button" className="button button-sm ghost" onClick={onOpenFolder}>
                 {t("jobs.actions.openFolder")}
               </button>
             ) : null}
             {showDownload ? (
-              <button type="button" className="button ghost" onClick={onDownload}>
+              <button type="button" className="button button-sm ghost" onClick={onDownload}>
                 {downloadLabel}
               </button>
             ) : null}
             {showCancel ? (
               <button
                 type="button"
-                className="button ghost"
+                className="button button-sm ghost"
                 disabled={isCancelling}
                 onClick={onCancel}
               >
@@ -403,11 +418,11 @@ export function JobDetailPanel({
             ) : null}
             <button
               type="button"
-              className="button primary job-restart-cta"
+              className="button button-sm primary job-restart-cta"
               onClick={isAwaitingInitialization ? onInitialize : onRestart}
               disabled={
                 isAwaitingInitialization
-                  ? isInitializing || !pendingInitialization.videoDescription.trim()
+                  ? isInitializing
                   : isRestarting || !isRestartableJobStatus(selectedJob.status)
               }
               title={
@@ -422,7 +437,7 @@ export function JobDetailPanel({
                   ? t("jobs.actions.restarting")
                   : isRestartableJobStatus(selectedJob.status) ? t("jobs.actions.restart") : t("jobs.actions.restartUnavailable")}
             </button>
-            <button type="button" className="button danger" onClick={onDelete} disabled={isDeleting}>
+            <button type="button" className="button button-sm danger" onClick={onDelete} disabled={isDeleting}>
               {isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
             </button>
           </div>
@@ -488,33 +503,34 @@ export function JobDetailPanel({
             </section>
           ) : null}
 
-          <section className="detail-block">
-            <div className="detail-key">Agent 决策驾驶舱</div>
-            <div className="timeline-list">
-              <div className="timeline-item">
-                <strong>当前阶段</strong>
-                <div className="muted compact-top">
-                  {currentStep ? `${currentStep.label}${currentStepProgressPercent != null ? ` · ${currentStepProgressPercent}%` : ""}` : "等待进入流程"}
+          <section className="detail-block job-progress-dashboard">
+            <div className="detail-key">任务进度</div>
+            <div className="job-progress-summary">
+              <div className="job-progress-percent">
+                <strong>{jobProgressPercent}%</strong>
+                <span>整体进度</span>
+              </div>
+              <div className="job-progress-main">
+                <div className="progress-bar job-progress-bar">
+                  <span style={{ width: `${jobProgressPercent}%` }} />
                 </div>
-              </div>
-              <div className="timeline-item">
-                <strong>计划状态</strong>
-                <div className="muted compact-top">{agentPlan?.status || "pending"}</div>
-              </div>
-              <div className="timeline-item">
-                <strong>执行方式</strong>
-                <div className="muted compact-top">
-                  {selectedJob.execution_mode === "smart_assist"
-                    ? "智能辅助"
-                    : selectedJob.execution_mode === "plan_first"
-                      ? "先生成方案"
-                      : "全自动"}
-                </div>
-              </div>
-              <div className="timeline-item">
-                <strong>人工介入</strong>
-                <div className="muted compact-top">
-                  {isAwaitingManualEdit ? "等待手动调整" : isReviewMode ? "当前处于审核路径" : "当前无需人工介入"}
+                <div className="job-progress-meta-grid">
+                  <div>
+                    <span>当前阶段</span>
+                    <strong>{currentStepSummary}</strong>
+                  </div>
+                  <div>
+                    <span>计划状态</span>
+                    <strong>{agentPlan?.status || "pending"}</strong>
+                  </div>
+                  <div>
+                    <span>执行方式</span>
+                    <strong>{executionModeSummary}</strong>
+                  </div>
+                  <div>
+                    <span>人工介入</span>
+                    <strong>{interventionSummary}</strong>
+                  </div>
                 </div>
               </div>
             </div>
@@ -522,8 +538,8 @@ export function JobDetailPanel({
 
           <section className="detail-block">
             <div className="detail-key">Agent 决策摘要</div>
-            <div className="timeline-list">
-              <div className="timeline-item">
+            <div className="detail-compact-grid">
+              <div className="detail-compact-card">
                 <strong>创作者卡片</strong>
                 <div className="muted compact-top">
                   {agentPlanPayload.creator?.name
@@ -533,15 +549,15 @@ export function JobDetailPanel({
                       : "未绑定创作者，当前任务走兼容默认路径。"}
                 </div>
               </div>
-              <div className="timeline-item">
+              <div className="detail-compact-card">
                 <strong>任务策略</strong>
                 <div className="muted compact-top">{agentPlanPayload.task_strategy?.summary || "未生成任务策略摘要。"}</div>
               </div>
-              <div className="timeline-item">
+              <div className="detail-compact-card">
                 <strong>智能视觉方案</strong>
                 <div className="muted compact-top">{agentPlanPayload.visual_plan?.summary || "未生成视觉方案摘要。"}</div>
               </div>
-              <div className="timeline-item">
+              <div className="detail-compact-card">
                 <strong>智能发布管理</strong>
                 <div className="muted compact-top">
                   {agentPlanPayload.publication_plan?.summary || "未生成发布管理摘要。"}
@@ -553,9 +569,9 @@ export function JobDetailPanel({
           {agentStages.length ? (
             <section className="detail-block">
               <div className="detail-key">流程轨道</div>
-              <div className="timeline-list">
+              <div className="detail-stage-grid">
                 {agentStages.map((stage, index) => (
-                  <div key={`${stage.key || index}`} className="timeline-item">
+                  <div key={`${stage.key || index}`} className="detail-stage-chip">
                     <strong>{stage.label || stage.key || `阶段 ${index + 1}`}</strong>
                     <div className="muted compact-top">{stage.summary || "暂无说明。"}</div>
                   </div>
@@ -567,9 +583,9 @@ export function JobDetailPanel({
           {agentDecisions?.length ? (
             <section className="detail-block">
               <div className="detail-key">当前候选决策</div>
-              <div className="timeline-list">
+              <div className="detail-compact-grid">
                 {agentDecisions.map((decision) => (
-                  <div key={decision.kind} className="timeline-item">
+                  <div key={decision.kind} className="detail-compact-card">
                     <strong>{decision.title}</strong>
                     <div className="compact-top">{decision.summary}</div>
                     {decision.detail ? <div className="muted compact-top">{decision.detail}</div> : null}
@@ -581,8 +597,8 @@ export function JobDetailPanel({
 
           <section className="detail-block">
             <div className="detail-key">自然语言调整</div>
-            <div className="form-grid">
-              <label>
+            <div className="agent-adjust-compact">
+              <label className="agent-adjust-target">
                 <span>调整目标</span>
                 <select className="input" value={agentAdjustTarget} onChange={(event) => setAgentAdjustTarget(event.target.value)}>
                   <option value="strategy">任务策略</option>
@@ -590,43 +606,43 @@ export function JobDetailPanel({
                   <option value="publication">发布管理</option>
                 </select>
               </label>
-            </div>
-            <label className="compact-top">
-              <span>调整说明</span>
-              <textarea
-                className="input"
-                rows={3}
-                value={agentAdjustPrompt}
-                onChange={(event) => setAgentAdjustPrompt(event.target.value)}
-                placeholder="例如：标题更克制，封面不要像广告，抖音前三秒更直接。"
-              />
-            </label>
-            <div className="toolbar compact-top">
-              <button
-                type="button"
-                className="button"
-                disabled={!agentAdjustPrompt.trim() || !onRefineAgentPlan || isRefiningAgentPlan}
-                onClick={() => {
-                  onRefineAgentPlan?.(agentAdjustPrompt, agentAdjustTarget);
-                  setAgentAdjustPrompt("");
-                }}
-              >
-                {isRefiningAgentPlan ? "调整中" : "提交调整"}
-              </button>
-              <button
-                type="button"
-                className="button ghost"
-                disabled={!onApplyAgentPlan || isApplyingAgentPlan}
-                onClick={() =>
-                  onApplyAgentPlan?.({
-                    selected_strategy_id: agentPlan?.task_strategy_id || undefined,
-                    selected_visual_plan_id: agentPlan?.visual_plan_id || undefined,
-                    selected_publication_profile_id: agentPlan?.publication_profile_id || undefined,
-                  })
-                }
-              >
-                {isApplyingAgentPlan ? "应用中" : "应用当前计划"}
-              </button>
+              <label className="agent-adjust-prompt">
+                <span>调整说明</span>
+                <textarea
+                  className="input"
+                  rows={2}
+                  value={agentAdjustPrompt}
+                  onChange={(event) => setAgentAdjustPrompt(event.target.value)}
+                  placeholder="例如：标题更克制，封面不要像广告，抖音前三秒更直接。"
+                />
+              </label>
+              <div className="agent-adjust-actions">
+                <button
+                  type="button"
+                  className="button button-sm"
+                  disabled={!agentAdjustPrompt.trim() || !onRefineAgentPlan || isRefiningAgentPlan}
+                  onClick={() => {
+                    onRefineAgentPlan?.(agentAdjustPrompt, agentAdjustTarget);
+                    setAgentAdjustPrompt("");
+                  }}
+                >
+                  {isRefiningAgentPlan ? "调整中" : "提交调整"}
+                </button>
+                <button
+                  type="button"
+                  className="button button-sm ghost"
+                  disabled={!onApplyAgentPlan || isApplyingAgentPlan}
+                  onClick={() =>
+                    onApplyAgentPlan?.({
+                      selected_strategy_id: agentPlan?.task_strategy_id || undefined,
+                      selected_visual_plan_id: agentPlan?.visual_plan_id || undefined,
+                      selected_publication_profile_id: agentPlan?.publication_profile_id || undefined,
+                    })
+                  }
+                >
+                  {isApplyingAgentPlan ? "应用中" : "应用当前计划"}
+                </button>
+              </div>
             </div>
           </section>
 
@@ -756,8 +772,16 @@ export function JobDetailPanel({
           ) : showFlowSections ? (
             <>
               <section className="detail-block">
-                <div className="detail-key">{t("jobs.detail.stepStatus")}</div>
-                <div className="steps-list">
+                <div className="detail-section-row">
+                  <div className="detail-key">{t("jobs.detail.stepStatus")}</div>
+                  <div className="step-summary-strip">
+                    <span>{completedStepCount} 完成</span>
+                    <span>{activeStepCount} 运行</span>
+                    <span>{pendingStepCount} 待处理</span>
+                    {failedStepCount ? <span>{failedStepCount} 异常</span> : null}
+                  </div>
+                </div>
+                <div className="steps-list step-card-grid">
                   {selectedJob.steps.map((step) => {
                     const stepItems = [...(stepItemsMap.get(step.step_name) ?? [])].sort((left, right) =>
                       String(right.timestamp || "").localeCompare(String(left.timestamp || "")),
@@ -775,6 +799,7 @@ export function JobDetailPanel({
                         open={isCurrentStep}
                         className={classNames(
                           "step-row",
+                          "step-card",
                           isCurrentStep && "step-row-current",
                           step.status === "failed" && "step-row-error",
                           step.status === "cancelled" && "step-row-error",
@@ -789,15 +814,18 @@ export function JobDetailPanel({
                                 {summaryText}
                               </div>
                             ) : null}
+                            {hasRunningProgress ? (
+                              <div className="progress-bar step-row-progress step-row-progress-inline">
+                                <span style={{ width: `${currentStepProgressPercent}%` }} />
+                              </div>
+                            ) : null}
                           </div>
-                          <span className={`status-chip ${step.status}`}>{statusLabel(step.status)}</span>
+                          <div className="step-row-status-stack">
+                            <span className={`status-chip ${step.status}`}>{statusLabel(step.status)}</span>
+                            {hasRunningProgress ? <span className="step-row-percent">{currentStepProgressPercent}%</span> : null}
+                          </div>
                         </summary>
                         <div className="step-row-body">
-                          {hasRunningProgress ? (
-                            <div className="progress-bar step-row-progress">
-                              <span style={{ width: `${currentStepProgressPercent}%` }} />
-                            </div>
-                          ) : null}
                           {stepItems.length ? (
                             <div className="step-event-list">
                               {stepItems.slice(0, 4).map((item) => (

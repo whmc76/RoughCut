@@ -189,6 +189,75 @@ def test_adopt_running_idle_managed_gpu_services_schedules_idle_stop(monkeypatch
     assert scheduled == [(target, "unit_test")]
 
 
+def test_gpu_guard_lease_tokens_ignore_stale_legacy_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakePipeline:
+        def __init__(self, client):
+            self.client = client
+
+        def zremrangebyscore(self, key, minimum, maximum):
+            self.client.zremrangebyscore(key, minimum, maximum)
+            return self
+
+        def zadd(self, key, mapping):
+            self.client.zadd(key, mapping)
+            return self
+
+        def expire(self, key, ttl):
+            self.client.expire(key, ttl)
+            return self
+
+        def zrem(self, key, token):
+            self.client.zrem(key, token)
+            return self
+
+        def execute(self):
+            return []
+
+    class FakeRedis:
+        def __init__(self):
+            self.values = {}
+            self.zsets = {}
+
+        def pipeline(self):
+            return FakePipeline(self)
+
+        def zremrangebyscore(self, key, minimum, maximum):
+            cutoff = float(maximum)
+            self.zsets[key] = {
+                token: score for token, score in self.zsets.get(key, {}).items() if float(score) > cutoff
+            }
+
+        def zadd(self, key, mapping):
+            self.zsets.setdefault(key, {}).update(mapping)
+
+        def zrem(self, key, token):
+            self.zsets.setdefault(key, {}).pop(token, None)
+
+        def zcard(self, key):
+            return len(self.zsets.get(key, {}))
+
+        def expire(self, key, ttl):
+            return True
+
+        def set(self, key, value, ex=None):
+            self.values[key] = value
+
+        def get(self, key):
+            return self.values.get(key)
+
+    fake_redis = FakeRedis()
+    fake_redis.values[docker_gpu_guard._lease_key("heygem")] = 10
+    monkeypatch.setattr(docker_gpu_guard, "_get_redis_client", lambda: fake_redis)
+
+    assert docker_gpu_guard._current_lease_count("heygem") == 0
+
+    token = docker_gpu_guard._register_lease_token("heygem")
+    assert docker_gpu_guard._current_lease_count("heygem") == 1
+
+    assert docker_gpu_guard._release_lease_token("heygem", token) == 0
+    assert docker_gpu_guard._current_lease_count("heygem") == 0
+
+
 def test_managed_service_defaults_use_current_project_root() -> None:
     settings = Settings(_env_file=None)
 

@@ -89,10 +89,12 @@ def fulfill_codex_imagegen_request(
                 timeout_sec=hard_timeout,
                 started_at=started_at,
             )
+            raw_result_path = Path(str(result.get("result_path") or ""))
+            result_path = output_path if output_path.exists() else raw_result_path
             completed = mark_codex_imagegen_request_completed(
                 request_path=request_path,
                 output_path=output_path,
-                result_path=Path(result["result_path"]),
+                result_path=result_path,
                 recorded_output_path=recorded_output_path or None,
                 session_id=str(result.get("session_id") or "").strip() or None,
                 timed_out=bool(result.get("timed_out")),
@@ -101,7 +103,7 @@ def fulfill_codex_imagegen_request(
                 "status": "completed",
                 "request_path": str(request_path),
                 "output_path": recorded_output_path or str(output_path),
-                "result_path": str(result["result_path"]),
+                "result_path": str(result_path),
                 "command": candidate_command,
                 "session_id": result.get("session_id"),
                 "timed_out": bool(result.get("timed_out")),

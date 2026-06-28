@@ -3097,6 +3097,7 @@ def _translate_legacy_runtime_path(value: str) -> Path | None:
         return None
     normalized = requested.replace("\\", "/")
     legacy_roots = (
+        "C:/roughcut_outputs",
         "C:/sample-data/roughcut-outputs",
         "C:/sample-workspace/RoughCut/data/runtime",
     )

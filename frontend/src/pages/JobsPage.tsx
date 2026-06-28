@@ -704,16 +704,6 @@ export function JobsPage() {
         onClose={() => setPublicationJobId(null)}
       >
         <section className="jobs-create-modal-content">
-          <div className="jobs-stage-head">
-            <div>
-              <h3>一键发布</h3>
-              <p>配置平台参数、定时发布和合集栏目，然后提交到 browser-agent。</p>
-            </div>
-            <div className="jobs-stage-meta">
-              <span>发布任务</span>
-              <strong>{publicationJob?.status === "done" ? "可配置" : "不可发布"}</strong>
-            </div>
-          </div>
           {publicationJob ? (
             <JobPublicationPanel job={publicationJob} onCancel={() => setPublicationJobId(null)} />
           ) : null}

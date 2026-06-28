@@ -80,6 +80,7 @@ import {
   buildYouTubeStudioContentListUrl,
   buildYouTubeStudioUploadEntryUrl,
   buildYouTubeFreshUploadEntryUrl,
+  preferredXiaohongshuCoverRatioTexts,
   PUBLICATION_CREATOR_SESSION_CONTRACT,
   PUBLICATION_TASK_IDENTITY_CONTRACT,
   resolvePlatformPublishEntryUrl,
@@ -149,6 +150,7 @@ import {
   findPlatformTab,
   findPlatformDomainFallbackTab,
   platformBodyWithTags,
+  expectedTags,
   reconcileTimedOutPublicationTask,
   shouldDispatchPublicationTaskReconcileCallback,
   richTextDraftValueMatches,
@@ -1357,6 +1359,9 @@ test("buildPublicationHealthPayload exposes task identity contract and service f
   assert.equal(payload.capabilities.creator_session_contract, PUBLICATION_CREATOR_SESSION_CONTRACT);
   assert.equal(payload.capabilities.browser_transport_kind, "chrome_extension_bridge");
   assert.equal(payload.capabilities.browser_extension_bridge, true);
+  assert.equal(payload.capabilities.task_owned_platform_pages, true);
+  assert.equal(payload.capabilities.platform_route_capability.bilibili.publish_entry_url, "https://member.bilibili.com/platform/upload/video/frame");
+  assert.equal(payload.capabilities.platform_route_capability.bilibili.auto_create_platform_tabs, true);
 });
 
 test("buildPublicationHealthPayload preserves creator session probe results", () => {
@@ -4916,6 +4921,15 @@ test("derivePlatformTabSelectionPolicy enables fresh-start tab mode for linear p
   assert.equal(policy.prefer_receipt_surface, false);
 });
 
+test("derivePlatformTabSelectionPolicy allows task-owned platform tab autocreate for normal bilibili publish tasks", () => {
+  const policy = derivePlatformTabSelectionPolicy("bilibili", {});
+
+  assert.equal(policy.lock_active_tab, false);
+  assert.equal(policy.fresh_start_platform_tab, false);
+  assert.equal(policy.allow_safe_autocreate, true);
+  assert.equal(resolvePlatformPublishEntryUrl("bilibili", [], policy), "https://member.bilibili.com/platform/upload/video/frame");
+});
+
 test("shouldSkipSharedBootstrapForFreshStart only triggers for fresh-start tab mode", () => {
   assert.equal(
     shouldSkipSharedBootstrapForFreshStart({
@@ -8318,6 +8332,15 @@ test("platformBodyWithTags keeps douyin body free of plain-text hashtags", () =>
     hashtags: ["测试A", "测试B"],
   });
   assert.equal(body, "正文A");
+});
+
+test("expectedTags splits combined hashtag strings from materialized platform copy", () => {
+  assert.deepEqual(
+    expectedTags({
+      hashtags: ["EDC折刀 #五彩碳马 #开箱 #折刀 #碳纤维"],
+    }),
+    ["EDC折刀", "五彩碳马", "开箱", "折刀", "碳纤维"],
+  );
 });
 
 test("resolveDouyinDeclarationOption falls back to no declaration when content has no explicit marker", () => {

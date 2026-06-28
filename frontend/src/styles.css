@@ -1509,6 +1509,38 @@ select {
   font-weight: 700;
 }
 
+.publication-config-panel {
+  align-items: start;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(260px, 0.36fr) minmax(0, 1fr);
+  padding: 12px;
+}
+
+.publication-profile-field,
+.publication-platform-field {
+  min-width: 0;
+}
+
+.publication-config-head {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.publication-config-head > div:first-child {
+  min-width: 0;
+}
+
+.publication-config-head .toolbar {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
 .publication-platform-picker {
   display: flex;
   flex-wrap: wrap;
@@ -1522,8 +1554,8 @@ select {
   cursor: pointer;
   display: inline-flex;
   gap: 8px;
-  min-height: 38px;
-  padding: 8px 10px;
+  min-height: 34px;
+  padding: 6px 10px;
 }
 
 .publication-platform-picker label.selected {
@@ -9732,6 +9764,7 @@ audio.tool-media {
   .smart-copy-publication-history-layout,
   .smart-copy-publication-attempt-list,
   .smart-copy-preview-layout,
+  .publication-config-panel,
   .watch-grid,
   .form-grid.three-up,
   .stats-grid,
@@ -9797,6 +9830,14 @@ audio.tool-media {
 }
 
 @media (max-width: 960px) {
+  .publication-config-head {
+    display: grid;
+  }
+
+  .publication-config-head .toolbar {
+    justify-content: flex-start;
+  }
+
   .jobs-stage-head,
   .jobs-dashboard-head {
     display: grid;
@@ -14555,6 +14596,13 @@ textarea.input {
 
 .job-upload-output-field {
   grid-column: 1 / -1;
+}
+
+.job-upload-publication-material-option {
+  min-height: 50px;
+  align-self: end;
+  border-color: rgba(15, 118, 110, 0.18);
+  background: #f8faf7;
 }
 
 .job-upload-settings-card > *,

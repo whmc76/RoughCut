@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+import uuid
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -15,6 +16,58 @@ from roughcut.publication_platform_matrix import platform_skips_explicit_visibil
 class _FakeSession:
     async def commit(self) -> None:
         return None
+
+
+@pytest.mark.asyncio
+async def test_create_job_publication_material_task_forces_fresh_material_generation(monkeypatch) -> None:
+    captured_body: dict[str, object] = {}
+
+    async def fake_load_publication_inputs(**_kwargs):
+        return (
+            SimpleNamespace(id="job-material", status="done"),
+            SimpleNamespace(output_path="E:/rendered/out/final.mp4"),
+            {},
+            {"id": "creator-from-plan", "display_name": "FAS"},
+        )
+
+    async def fake_create_generate_task(body):
+        captured_body["folder_path"] = body.folder_path
+        captured_body["platforms"] = list(body.platforms)
+        captured_body["use_existing_cover"] = body.use_existing_cover
+        captured_body["creator_profile_id"] = body.creator_profile_id
+        captured_body["force_regenerate"] = body.force_regenerate
+        return {
+            "id": "task-1",
+            "folder_path": body.folder_path,
+            "platforms": body.platforms,
+            "status": "queued",
+            "progress": 0,
+            "stage": "queued",
+            "message": "queued",
+            "created_at": "2026-06-27T00:00:00Z",
+            "updated_at": "2026-06-27T00:00:00Z",
+        }
+
+    monkeypatch.setattr(jobs_api, "_load_publication_inputs", fake_load_publication_inputs)
+    monkeypatch.setattr(ic_api, "create_generate_task", fake_create_generate_task)
+
+    payload = jobs_api.PublicationSubmitIn(platforms=["douyin", "xiaohongshu"])
+
+    result = await jobs_api.create_job_publication_material_task(
+        uuid.uuid4(),
+        payload,
+        session=_FakeSession(),
+    )
+
+    assert result["id"] == "task-1"
+    captured_body["folder_path"] = str(captured_body["folder_path"]).replace("\\", "/")
+    assert captured_body == {
+        "folder_path": "E:/rendered/out",
+        "platforms": ["douyin", "xiaohongshu"],
+        "use_existing_cover": False,
+        "creator_profile_id": "creator-from-plan",
+        "force_regenerate": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -657,7 +710,7 @@ async def test_job_publish_merges_creator_card_publication_bindings() -> None:
     credentials = publication.active_publication_credentials(merged)
     assert [item["platform"] for item in credentials] == ["douyin"]
     assert credentials[0]["status"] == "logged_in"
-    assert credentials[0]["adapter"] == "social_auto_upload"
+    assert credentials[0]["adapter"] == "browser_agent"
     assert credentials[0]["credential_ref"] == "social-auto-upload:creator-demo-douyin:douyin"
 
 
@@ -764,7 +817,7 @@ async def test_intelligent_publish_merges_creator_card_publication_bindings() ->
     credentials = publication.active_publication_credentials(merged)
     assert [item["platform"] for item in credentials] == ["bilibili"]
     assert credentials[0]["status"] == "logged_in"
-    assert credentials[0]["adapter"] == "social_auto_upload"
+    assert credentials[0]["adapter"] == "browser_agent"
     assert credentials[0]["credential_ref"] == "social-auto-upload:creator-demo-bilibili:bilibili"
 
 

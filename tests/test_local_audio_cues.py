@@ -45,6 +45,28 @@ def test_plan_local_music_entry_adds_shared_audio_cue_contract() -> None:
     assert plan["audio_cues"][0]["time_sec"] == 5.6
 
 
+def test_plan_local_music_entry_falls_back_to_start_for_long_asr_segment() -> None:
+    plan = asyncio.run(
+        plan_local_music_entry(
+            music_plan={"asset_id": "music-a", "path": "bgm.mp3"},
+            subtitle_items=[
+                {
+                    "start_time": 0.0,
+                    "end_time": 74.72,
+                    "text_final": "这是一整段被 ASR 合并起来的产品介绍和使用方法，没有可靠的早期停顿。",
+                }
+            ],
+            content_profile={"content_kind": "tutorial"},
+            timeline_analysis={"hook_end_sec": 2.0},
+        )
+    )
+
+    assert plan is not None
+    assert plan["enter_sec"] == 0.0
+    assert plan["audio_cues"][0]["time_sec"] == 0.0
+    assert plan["timing_summary"]["review_recommended"] is True
+
+
 def test_packaging_timeline_local_audio_cues_reads_music_and_sfx() -> None:
     payload = {
         "packaging_timeline": {

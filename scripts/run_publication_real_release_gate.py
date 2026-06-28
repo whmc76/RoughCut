@@ -2140,7 +2140,7 @@ def _coerce_platform_packaging_entry(
     claim_refs = [str(item).strip() for item in claim_refs if str(item).strip()]
     cover_slots = derive_publication_cover_slots(raw)
     primary_cover_path = publication_primary_cover_path(raw)
-    return {
+    normalized_entry = {
         "titles": [platform_title]
         if not isinstance(raw.get("titles"), (list, tuple, set))
         else _coerce_text_list(raw.get("titles")) or [platform_title],
@@ -2161,11 +2161,21 @@ def _coerce_platform_packaging_entry(
         "copy_material": dict(raw.get("copy_material"))
         if isinstance(raw.get("copy_material"), dict)
         else {},
-        "publish_ready": publication_packaging_entry_publish_ready(raw),
-        "blocking_reasons": publication_packaging_entry_blocking_reasons(raw),
+        "blocking_reasons": _coerce_text_list(raw.get("blocking_reasons")),
         "claim_refs": claim_refs,
         "copy_refs": claim_refs,
     }
+    if isinstance(raw.get("live_publish_preflight"), dict):
+        normalized_entry["live_publish_preflight"] = dict(raw.get("live_publish_preflight") or {})
+    if isinstance(raw.get("publish_ready"), bool):
+        normalized_entry["reported_publish_ready"] = bool(raw.get("publish_ready"))
+    normalized_entry["publish_ready"] = publication_packaging_entry_publish_ready(
+        normalized_entry,
+        trust_explicit_flag=False,
+    )
+    if not normalized_entry["publish_ready"] and not normalized_entry["blocking_reasons"]:
+        normalized_entry["blocking_reasons"] = publication_packaging_entry_blocking_reasons(normalized_entry)
+    return normalized_entry
 
 
 def _now() -> str:

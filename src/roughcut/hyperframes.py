@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any, Sequence
 
 from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
@@ -19,6 +20,7 @@ HYPERFRAMES_OPTION_KEYS = (
     "unified_subtitle_style",
 )
 DEFAULT_HYPERFRAMES_OPTIONS = {key: True for key in HYPERFRAMES_OPTION_KEYS}
+DEFAULT_HYPERFRAMES_OPTIONS["progress_bar"] = False
 DEFAULT_HYPERFRAMES_SUBTITLE_STYLE = "keyword_highlight"
 DEFAULT_HYPERFRAMES_SUBTITLE_MOTION_STYLE = "motion_pop"
 
@@ -64,6 +66,7 @@ def build_static_packaging_plan(
     subtitles_plan: dict[str, Any] | None = None,
     editing_accents: dict[str, Any] | None = None,
     focus_plan: dict[str, Any] | None = None,
+    chapter_analysis: dict[str, Any] | None = None,
     audio_cues: Sequence[dict[str, Any]] | None = None,
     options: dict[str, Any] | None = None,
     source: str = "roughcut.edit.render_plan",
@@ -86,6 +89,7 @@ def build_static_packaging_plan(
             "sound_effects": copy.deepcopy(list(resolved_accents.get("sound_effects") or [])),
         },
         "focus": copy.deepcopy(focus_plan or {}),
+        "chapter_analysis": copy.deepcopy(chapter_analysis or {}),
         "audio_cues": copy.deepcopy(list(audio_cues or [])),
         "render_contract": {
             "visual_timeline_owner": HYPERFRAMES_ENGINE,
@@ -98,9 +102,10 @@ def build_static_packaging_plan(
         "transitions",
         "smart_effects",
         "sound_cues",
-        "progress_bar",
         "chapter_cards",
     ]
+    if resolved_options["progress_bar"]:
+        tracks.append("progress_bar")
     return build_plan(width=0, height=0, duration_sec=0.0, elements=[], source=source, metadata=metadata, tracks=tracks)
 
 
@@ -114,6 +119,7 @@ def build_render_plan(
     overlay_plan: dict[str, Any] | None = None,
     editing_accents: dict[str, Any] | None = None,
     focus_plan: dict[str, Any] | None = None,
+    chapter_analysis: dict[str, Any] | None = None,
     section_choreography: dict[str, Any] | None = None,
     audio_cues: Sequence[dict[str, Any]] | None = None,
     options: dict[str, Any] | None = None,
@@ -123,6 +129,7 @@ def build_render_plan(
         subtitles_plan=subtitles_plan,
         editing_accents=editing_accents,
         focus_plan=focus_plan,
+        chapter_analysis=chapter_analysis,
         audio_cues=audio_cues,
         options=options,
         source=source,
@@ -138,6 +145,7 @@ def build_render_plan(
     metadata["duration_sec"] = round(max(0.0, float(duration_sec)), 3)
     metadata["canvas"] = {"width": int(width), "height": int(height)}
     chapter_segments = _resolve_chapter_segments(
+        chapter_analysis=chapter_analysis or metadata.get("chapter_analysis") or {},
         focus_plan=focus_plan or {},
         subtitle_items=subtitle_items or [],
         section_choreography=section_choreography or {},
@@ -486,6 +494,7 @@ def _chapter_card_elements(
 
 def _resolve_chapter_segments(
     *,
+    chapter_analysis: dict[str, Any],
     focus_plan: dict[str, Any],
     subtitle_items: Sequence[dict[str, Any]],
     section_choreography: dict[str, Any],
@@ -493,6 +502,7 @@ def _resolve_chapter_segments(
 ) -> list[dict[str, Any]]:
     duration = max(0.0, float(duration_sec or 0.0))
     candidates = [
+        _chapter_segments_from_chapter_analysis(chapter_analysis, duration_sec=duration),
         _chapter_segments_from_subtitles(subtitle_items, duration_sec=duration),
         _chapter_segments_from_section_choreography(section_choreography, duration_sec=duration),
         _chapter_segments_from_focus_cards(focus_plan, duration_sec=duration),
@@ -507,6 +517,40 @@ def _resolve_chapter_segments(
         if normalized:
             return normalized[:8]
     return []
+
+
+def _chapter_segments_from_chapter_analysis(
+    chapter_analysis: dict[str, Any],
+    *,
+    duration_sec: float,
+) -> list[dict[str, Any]]:
+    if not isinstance(chapter_analysis, dict):
+        return []
+    chapters = chapter_analysis.get("chapters")
+    if not isinstance(chapters, list):
+        return []
+    segments: list[dict[str, Any]] = []
+    for chapter in chapters:
+        if not isinstance(chapter, dict):
+            continue
+        start = max(0.0, float(chapter.get("start_sec", chapter.get("start_time", 0.0)) or 0.0))
+        end = max(start, float(chapter.get("end_sec", chapter.get("end_time", start)) or start))
+        if duration_sec > 0:
+            start = min(start, duration_sec)
+            end = min(max(start, end), duration_sec)
+        title = _chapter_title_from_payload(chapter, role="semantic_topic")
+        if not title:
+            continue
+        segments.append(
+            {
+                "start_sec": round(start, 3),
+                "end_sec": round(end, 3),
+                "role": str(chapter.get("role") or "semantic_topic"),
+                "title": title,
+                "source": str(chapter.get("source") or chapter_analysis.get("source") or "llm_chapter_analysis"),
+            }
+        )
+    return segments
 
 
 def _chapter_segments_from_subtitles(
@@ -700,19 +744,21 @@ def _normalize_chapter_segments(
 
 
 _CHAPTER_TITLE_KEYS = (
+    "title_short",
+    "short_title",
     "title",
     "chapter_title",
-    "section_title",
     "heading",
     "headline",
     "name",
     "label",
-    "text",
+    "topic",
     "display_text",
+    "text",
     "text_final",
     "text_norm",
     "text_raw",
-    "topic",
+    "section_title",
 )
 
 
@@ -728,8 +774,68 @@ def _chapter_title_from_payload(payload: dict[str, Any], *, role: str) -> str:
 def _clean_chapter_title(value: Any) -> str:
     if value is None:
         return ""
-    text = " ".join(str(value).split())
-    return text.strip()
+    text = _normalize_chapter_title_text(value)
+    return _clean_llm_chapter_title(text)
+
+
+_CHAPTER_TITLE_SENTENCE_MARKERS = (
+    "这个",
+    "那个",
+    "就是",
+    "然后",
+    "但是",
+    "所以",
+    "因为",
+    "可能",
+    "其实",
+    "感觉",
+    "我觉得",
+    "可以说",
+    "本质上",
+)
+
+
+def _clean_llm_chapter_title(value: Any) -> str:
+    text = _normalize_chapter_title_text(value)
+    if not text:
+        return ""
+    if not _chapter_title_looks_like_sentence(text) and _chapter_title_visual_units(text) <= 8.0:
+        return text
+    if _chapter_title_looks_like_sentence(text):
+        return ""
+    return _clip_chapter_title(text)
+
+
+def _normalize_chapter_title_text(value: Any) -> str:
+    text = re.sub(r"\s+", "", str(value or ""))
+    text = re.sub(r"[\"'“”‘’《》【】\[\]()（）]", "", text)
+    return text.strip(" -_：:，,。.;；！？!?")
+
+
+def _chapter_title_looks_like_sentence(text: str) -> bool:
+    if len(text) > 14:
+        return True
+    return any(marker in text for marker in _CHAPTER_TITLE_SENTENCE_MARKERS)
+
+
+def _clip_chapter_title(text: str) -> str:
+    normalized = _normalize_chapter_title_text(text)
+    if not normalized:
+        return ""
+    if _chapter_title_visual_units(normalized) <= 8.0:
+        return normalized
+    clipped = ""
+    units = 0.0
+    for char in normalized:
+        units += 1.0 if "\u4e00" <= char <= "\u9fff" else 0.55
+        if units > 8.0:
+            break
+        clipped += char
+    return clipped.strip(" -_：:，,。.;；！？!?")
+
+
+def _chapter_title_visual_units(text: str) -> float:
+    return sum(1.0 if "\u4e00" <= char <= "\u9fff" else 0.55 for char in str(text or ""))
 
 
 def _chapter_title(*, role: str) -> str:

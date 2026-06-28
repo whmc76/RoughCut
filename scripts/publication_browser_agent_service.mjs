@@ -1390,7 +1390,7 @@ export function shouldDeferGenericPostUploadIntegrityUntilPlatformAdapter(platfo
   // Dedicated platform workflows should finish their own project steps
   // (for example Bilibili cover/collection/schedule) before generic
   // post-upload integrity is allowed to gate the run.
-  return true;
+  return normalizePlatform(platform) !== "bilibili";
 }
 
 export function buildPendingUploadMaterialIntegrity(platform, readiness = {}, route = {}) {
@@ -1403,9 +1403,7 @@ export function buildPendingUploadMaterialIntegrity(platform, readiness = {}, ro
   const mediaPresent = Boolean(last.mediaPresent);
   const uploadPromptOnly = Boolean(last.uploadPromptOnly);
   const fileInputCount = Number(last.fileInputCount || 0);
-  const pendingReason = String(
-    state.pending_reason,
-  ).trim();
+  const pendingReason = String(state.pending_reason || "").trim();
   const verificationState = failed ? "error" : ready ? "ready" : "not_ready";
   const verificationReason = pendingReason || (failed
     ? "upload_failed"
@@ -1567,8 +1565,17 @@ export function buildCompositeUploadPendingProcessingEnvelope({
     ? content.platform_specific_overrides
     : {};
   const youtubeCurrentFreshUploadResume = youtubeFreshUploadOnly
-    && Boolean(youtubeOverrides.youtube_current_fresh_upload_resume)
-    && String(youtubeOverrides.recovery_mode || "").trim().toLowerCase() === "prepublish_resume"
+    && (
+      (
+        Boolean(youtubeOverrides.youtube_current_fresh_upload_resume)
+        && String(youtubeOverrides.recovery_mode || "").trim().toLowerCase() === "prepublish_resume"
+      )
+      || (
+        Boolean(prepareOnlyCurrentPage)
+        && Array.isArray(actions)
+        && actions.some((action) => String(action?.kind || "").trim() === "youtube_upload_ready_wait_after_fresh_upload_start")
+      )
+    )
     && Boolean(prepareOnlyCurrentPage);
   const normalizedRoute = {
     url: String(route?.url || ""),
@@ -1883,7 +1890,7 @@ export function verifyCompositeDeclarationField(
     const requireOriginalDeclaration = Boolean(options?.xiaohongshuRequireOriginalDeclaration);
     const originalDeclarationEnabled = Boolean(options?.xiaohongshuOriginalDeclarationEnabled);
     const placeholderVisible = /添加内容类型声明|请选择内容类型声明|请选择声明类型/.test(text) || /添加内容类型声明|请选择内容类型声明|请选择声明类型/.test(actual);
-    if (!expected) return requireOriginalDeclaration ? originalDeclarationEnabled : (!placeholderVisible || !hasTitleOrBody);
+    if (!expected) return requireOriginalDeclaration ? (originalDeclarationEnabled && !placeholderVisible) : (!placeholderVisible || !hasTitleOrBody);
     if (requireOriginalDeclaration && !originalDeclarationEnabled) return false;
     if (actual && (actual === expected || actual.includes(expected) || expected.includes(actual))) return true;
     if (placeholderVisible) return false;
@@ -3025,6 +3032,7 @@ export function isCompositePublishRouteContext(platform, route = {}) {
     const candidateUrl = String(candidate?.url || "").trim().toLowerCase();
     const candidateText = String(candidate?.text || "").replace(/\s+/g, " ").trim();
     if (!candidateUrl.includes("/creator-micro/content/upload")) return false;
+    if (/你还有上次未发布的视频|继续编辑|放弃|不用了|未发布的视频/.test(candidateText)) return false;
     return /点击上传|上传视频|拖拽视频到此|直接将视频文件拖入此区域|视频大小和格式|继续编辑|放弃|不用了|未发布的视频/.test(candidateText);
   };
   if (!url && !text) return false;
@@ -3032,6 +3040,10 @@ export function isCompositePublishRouteContext(platform, route = {}) {
     if (/creator\.douyin\.com\/creator-micro\/content\/manage/i.test(url)) return false;
     const loginSurfaceHints = /扫码登录|验证码登录|登录\/注册|我是创作者|我是mcn机构|创作者登录|抖音创作者中心是抖音创作者的一站式服务平台/i.test(text);
     if (loginSurfaceHints) return false;
+    if (
+      lowerUrl.includes("/creator-micro/content/upload")
+      && /你还有上次未发布的视频|继续编辑|放弃|不用了|未发布的视频/.test(text)
+    ) return false;
     if (isDouyinUploadEntrySurfaceLocal({ url, text })) return true;
     const publishSurfaceReady =
       /作品描述|设置封面|自主声明|添加合集|谁可以看|发布时间|定时发布/.test(text)
@@ -4626,6 +4638,9 @@ export function derivePlatformTabSelectionPolicy(platform, recoveryContext = {})
   const allowSafeAutocreate = Boolean(
     freshStartPlatformTab
     || (!lockActiveTab && recoveryMode === "receipt_rebind")
+    || (!lockActiveTab && !linearCurrentPageMode)
+    || context.auto_create_platform_tabs
+    || context.task_owned_platform_tab
   );
   return {
     lock_active_tab: lockActiveTab,
@@ -4725,7 +4740,11 @@ export function shouldEnforcePlatformPublishRoute(platform, recoveryContext = {}
   ) {
     return false;
   }
-  if (normalizedPlatform === "douyin" && currentPageOnlyMode) {
+  if (
+    normalizedPlatform === "douyin"
+    && currentPageOnlyMode
+    && String(context.recovery_mode || "").trim().toLowerCase() === "fresh_publish"
+  ) {
     return false;
   }
   if (normalizedPlatform === "xiaohongshu" && currentPageOnlyMode) {
@@ -4925,6 +4944,18 @@ export function findPlatformTabs(tabs, platform, options = {}) {
   const activeMatches = scoreTabs(allTabs.filter((tab) => tab?.active === true));
   if (activeMatches.length) {
     return activeMatches;
+  }
+  if (!allTabs.some((tab) => tab?.active === true)) {
+    const entryUrl = resolvePlatformPublishEntryUrl(normalizedPlatform, allTabs, options);
+    const exactEntryMatches = allTabs
+      .filter((tab) => {
+        const tabUrl = String(tab?.url || "").trim();
+        return entryUrl && tabUrl === entryUrl;
+      })
+      .filter((tab) => platformTabScore(tab, domains, normalizedPlatform, options) > 0);
+    if (exactEntryMatches.length === 1) {
+      return exactEntryMatches;
+    }
   }
   return [];
 }
@@ -6648,6 +6679,10 @@ async function dismissInterruptions(client, tab, platform, stage = "unspecified"
       "[class*=tooltip i]",
       "[class*=guide i]",
       "[class*=alert i]",
+      "ytcp-confirmation-dialog",
+      "ytcp-dialog",
+      "tp-yt-paper-dialog",
+      "ytcp-uploads-dialog",
     ].join(",")).filter(visible);
     const overlaySet = new Set(overlays);
     const isInsideOverlay = (el) => overlays.some((overlay) => overlay === el || overlay.contains(el));
@@ -6667,6 +6702,12 @@ async function dismissInterruptions(client, tab, platform, stage = "unspecified"
       && (
         /详细信息|视频元素|检查|公开范围|视频链接|保存或发布/i.test(pageText)
         || overlayTexts.some((text) => /取消上传|你添加到视频的任何详情都会被删除|Cancel upload|Any details you added/i.test(text))
+      );
+    const youtubeCancelUploadConfirmPresent =
+      platform === "youtube"
+      && (
+        overlayTexts.some((text) => /取消上传|Cancel upload/i.test(text) && /你添加到视频的任何详情都会被删除|Any details you added/i.test(text))
+        || (/取消上传|Cancel upload/i.test(pageText) && /你添加到视频的任何详情都会被删除|Any details you added/i.test(pageText))
       );
     const labelOf = (el) => clean(el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("alt") || el.getAttribute("placeholder"));
     const classOf = (el) => clean(el.className && typeof el.className === "string" ? el.className : "");
@@ -6706,6 +6747,34 @@ async function dismissInterruptions(client, tab, platform, stage = "unspecified"
         return leftClose - rightClose || left.area - right.area;
       });
     const clicked = [];
+    if (youtubeCancelUploadConfirmPresent) {
+      const closeCandidate = candidates
+        .filter((item) => {
+          const label = item.label || item.ariaLabel || item.title || "";
+          if (/取消上传|Cancel upload/i.test(label)) return false;
+          return /^(关闭|Close|×|x|X|✕)$/.test(label) || looksLikeCloseIcon(item.el, label);
+        })
+        .sort((left, right) => {
+          const leftExact = /^(关闭|Close|×|x|X|✕)$/.test(left.label || left.ariaLabel || left.title || "") ? 0 : 1;
+          const rightExact = /^(关闭|Close|×|x|X|✕)$/.test(right.label || right.ariaLabel || right.title || "") ? 0 : 1;
+          return leftExact - rightExact || left.area - right.area;
+        })[0];
+      if (closeCandidate?.el) {
+        closeCandidate.el.scrollIntoView({ block: "center", inline: "center" });
+        const rect = closeCandidate.el.getBoundingClientRect();
+        const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+        for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+          closeCandidate.el.dispatchEvent(new MouseEvent(type, eventInit));
+        }
+        clicked.push({
+          kind: "youtube_cancel_upload_confirm_closed",
+          label: closeCandidate.label || closeCandidate.ariaLabel || closeCandidate.title || "icon_close",
+          platform,
+          stage,
+        });
+        return { clicked };
+      }
+    }
     if (youtubeUploadEntryOverlayPresent || youtubeUploadProgressPresent || youtubeUploadEditorOrCancelDialogPresent) {
       return {
         clicked,
@@ -7154,6 +7223,9 @@ export function canReuseCurrentPageMediaForPrepublish(platform, snapshot = {}, m
     const titleMatched = !titleSignals.length
       || titleSignals.some((value) => text.toLowerCase().includes(value));
     const hasAttachedDraftTitle = /上传完成|更换视频|标题|简介|创作声明|标签|定时发布|立即投稿|存草稿/.test(text);
+    if (bilibiliSurface.media_attached && bilibiliSurface.concrete_progress) {
+      return { reusable: true, media_attached: true, reason: "bilibili_upload_attached_pending" };
+    }
     if (
       (bilibiliSurface.ready_surface || bilibiliSurface.media_attached)
       && hasAttachedDraftTitle
@@ -7163,6 +7235,9 @@ export function canReuseCurrentPageMediaForPrepublish(platform, snapshot = {}, m
       return { reusable: false, media_attached: true, reason: "bilibili_existing_draft_title_mismatch" };
     }
     if ((bilibiliSurface.ready_surface || bilibiliSurface.media_attached) && matchedMediaPath) {
+      return { reusable: true, media_attached: true, reason: "media_path_match" };
+    }
+    if (bilibiliSurface.ready_surface && allowDraftTitleMismatchReuse) {
       return { reusable: true, media_attached: true, reason: "media_path_match" };
     }
     if (bilibiliSurface.ready_surface) {
@@ -12078,9 +12153,12 @@ function preferredKuaishouCoverRatioTexts(content = {}) {
   return ["4:3", "3:4"];
 }
 
-function preferredXiaohongshuCoverRatioTexts(content = {}) {
-  const primarySlot = resolveExpectedCoverSlotsForPlatform("xiaohongshu", content)
-    .find((item) => String(item?.cover_path || "").trim());
+export function preferredXiaohongshuCoverRatioTexts(content = {}) {
+  const primarySlot =
+    expectedCoverSlots(content)
+      .find((item) => String(item?.cover_path || "").trim())
+    || resolveExpectedCoverSlotsForPlatform("xiaohongshu", content)
+      .find((item) => String(item?.cover_path || "").trim());
   const normalized = normalizeCompositeCoverSlotKey(primarySlot?.slot || primarySlot?.matrix_key || primarySlot?.label || "");
   if (normalized === "portrait_3_4") return ["3:4", "4:3"];
   if (normalized === "landscape_4_3") return ["4:3", "3:4"];
@@ -12327,9 +12405,19 @@ export function deriveCompositeDraftPolicyBlockers(platform, content = {}, nowMs
   return blockers;
 }
 
-function expectedTags(content, limit = 12) {
+export function expectedTags(content, limit = 12) {
+  const expandTag = (value) => {
+    const text = String(value || "").trim();
+    if (!text) return [];
+    if (!text.includes("#")) return [text.replace(/^#/, "").trim()].filter(Boolean);
+    const tokens = text
+      .split(/\s+/)
+      .map((item) => item.replace(/^#/, "").trim())
+      .filter(Boolean);
+    return tokens.length ? tokens : [text.replace(/^#/, "").trim()].filter(Boolean);
+  };
   return Array.from(
-    new Set([...(content.hashtags || []), ...(content.structured_tags || []), ...(content.tags || [])].map((item) => String(item || "").replace(/^#/, "").trim()).filter(Boolean)),
+    new Set([...(content.hashtags || []), ...(content.structured_tags || []), ...(content.tags || [])].flatMap(expandTag)),
   ).slice(0, limit);
 }
 
@@ -12418,7 +12506,13 @@ export function verifyCompositeBodyField(platform, expectedBody, actualBody, { t
     const squashedActual = squash(actual);
     if (!squashedActual) return false;
     if (squashedActual === squashedExpected) return true;
-    if (squashedActual.includes(squashedExpected)) return true;
+    if (squashedActual.includes(squashedExpected)) {
+      const start = squashedActual.indexOf(squashedExpected);
+      const before = squashedActual.slice(0, start);
+      const trailing = squashedActual.slice(start + squashedExpected.length);
+      return before.length <= Math.max(4, Math.floor(squashedExpected.length * 0.08))
+        && trailing.length <= Math.max(6, Math.floor(squashedExpected.length * 0.12));
+    }
     if (squashedExpected.includes(squashedActual)) return squashedActual.length >= Math.min(24, squashedExpected.length);
     if (squashedActual.startsWith(squashedExpected)) {
       const trailing = squashedActual.slice(squashedExpected.length);
@@ -23121,6 +23215,168 @@ async function scrollYouTubeRichTextTargetIntoView(client, field) {
   })()`, 10000);
 }
 
+async function setYouTubeRichTextWithDomFallback(client, title, body) {
+  return evaluateWithClient(client, `(() => {
+    const expected = ${JSON.stringify({
+      title: normalizeCompositeTitleForPlatform("youtube", title),
+      body: String(body || "").trim(),
+    })};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const normalizeDraft = ${normalizeRichTextDraftValue.toString()};
+    const draftMatches = ${richTextDraftValueMatches.toString()};
+    const roots = [];
+    const visitRoot = (root) => {
+      if (!root || roots.includes(root)) return;
+      roots.push(root);
+      for (const el of [...root.querySelectorAll("*")]) {
+        if (el.shadowRoot) visitRoot(el.shadowRoot);
+        if (el.tagName === "IFRAME") {
+          try {
+            if (el.contentDocument) visitRoot(el.contentDocument);
+          } catch {}
+        }
+      }
+    };
+    visitRoot(document);
+    const queryAll = (selector) => roots.flatMap((root) => {
+      try {
+        return [...root.querySelectorAll(selector)];
+      } catch {
+        return [];
+      }
+    });
+    const isContentEditableElement = (el) => Boolean(
+      el?.isContentEditable
+      || (
+        typeof el?.hasAttribute === "function"
+        && el.hasAttribute("contenteditable")
+        && String(el.getAttribute("contenteditable") || "").toLowerCase() !== "false"
+      )
+    );
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const readValue = (el) => {
+      if (!el) return "";
+      if (isContentEditableElement(el)) return normalizeDraft(el.innerText || el.textContent || "");
+      return normalizeDraft(el.value || "");
+    };
+    const fieldInfo = (el) => clean([
+      el.placeholder,
+      el.getAttribute("aria-label"),
+      el.getAttribute("data-testid"),
+      el.value,
+      el.innerText,
+      el.closest("label")?.innerText,
+      el.parentElement?.innerText,
+    ].join(" "));
+    const editables = queryAll("textarea,input[type=text],[contenteditable],#textbox,div[role=textbox]")
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        return {
+          el,
+          text: fieldInfo(el),
+          area: rect.width * rect.height,
+          tag: String(el.tagName || "").toLowerCase(),
+          role: clean(el.getAttribute("role") || "").toLowerCase(),
+          actual: readValue(el),
+          top: rect.top,
+        };
+      })
+      .filter((item) => item.area > 1000)
+      .sort((left, right) => left.top - right.top || right.area - left.area);
+    const titlePatterns = [/标题（必填）|添加一个可描述你视频的标题|add a title|title/i];
+    const bodyPatterns = [/向观看者介绍你的视频|describe your video|description|说明/i];
+    const titleTarget = expected.title
+      ? editables.find((item) => titlePatterns.some((pattern) => pattern.test(item.text)))
+      : null;
+    const bodyTarget = expected.body
+      ? (
+        editables.find((item) => bodyPatterns.some((pattern) => pattern.test(item.text)))
+        || editables.find((item) => (item.el.isContentEditable || item.tag === "textarea") && !titlePatterns.some((pattern) => pattern.test(item.text)))
+      )
+      : null;
+    const applyContentEditableValue = (el, value) => {
+      el.replaceChildren();
+      for (const [index, line] of String(value || "").split(/\\n/).entries()) {
+        if (index) el.appendChild(document.createElement("br"));
+        el.appendChild(document.createTextNode(line));
+      }
+    };
+    const dispatchChangeEvents = (el, value) => {
+      try {
+        el.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: "insertReplacementText", data: value }));
+      } catch {}
+      try {
+        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertReplacementText", data: value }));
+      } catch {
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new Event("blur", { bubbles: true }));
+    };
+    const setTarget = (target, value) => {
+      const el = target?.el;
+      if (!el || !String(value || "").trim()) return { ok: false, reason: "missing_target_or_value" };
+      const before = readValue(el);
+      el.scrollIntoView({ block: "center", inline: "center" });
+      el.focus();
+      if (isContentEditableElement(el)) {
+        try {
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          selection.deleteFromDocument();
+          document.execCommand("insertText", false, value);
+        } catch {}
+        if (!draftMatches(readValue(el), value)) {
+          applyContentEditableValue(el, value);
+        }
+      } else {
+        const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+        if (setter) setter.call(el, value);
+        else el.value = value;
+      }
+      dispatchChangeEvents(el, value);
+      const after = readValue(el);
+      return {
+        ok: draftMatches(after, value),
+        before,
+        after,
+        hint: String(target.text || "").slice(0, 160),
+      };
+    };
+    const actions = [];
+    if (expected.title) actions.push({ field: "title", ...setTarget(titleTarget, expected.title) });
+    if (expected.body) actions.push({ field: "body", ...setTarget(bodyTarget, expected.body) });
+    const actualTitle = titleTarget ? readValue(titleTarget.el) : "";
+    const actualBody = bodyTarget ? readValue(bodyTarget.el) : "";
+    return {
+      filled: actions.some((item) => item.ok),
+      actions,
+      verified_title: !expected.title || draftMatches(actualTitle, expected.title),
+      verified_body: !expected.body || draftMatches(actualBody, expected.body),
+      actual_title: actualTitle,
+      actual_body: actualBody,
+      candidates: editables.slice(0, 12).map((item) => ({
+        text: item.text.slice(0, 140),
+        actual: item.actual.slice(0, 140),
+        area: item.area,
+        tag: item.tag,
+        role: item.role,
+        top: item.top,
+      })),
+    };
+  })()`, 30000);
+}
+
 async function setYouTubeRichTextWithNativeInput(client, title, body) {
   const expectedTitle = normalizeCompositeTitleForPlatform("youtube", title);
   const expectedBody = String(body || "").trim();
@@ -23194,18 +23450,58 @@ async function setYouTubeRichTextWithNativeInput(client, title, body) {
   }));
   const actualTitle = String(after?.title_target?.actual || "").trim();
   const actualBody = String(after?.body_target?.actual || "").trim();
+  let verifiedTitle = !expectedTitle || richTextDraftValueMatches(actualTitle, expectedTitle);
+  let verifiedBody = !expectedBody || richTextDraftValueMatches(actualBody, expectedBody);
+  let fallback = null;
+  let finalActualTitle = actualTitle;
+  let finalActualBody = actualBody;
+  let finalRoute = after?.route || before?.route || {};
+  let finalCandidates = after?.candidates || before?.candidates || [];
+  if (!verifiedTitle || !verifiedBody) {
+    fallback = await setYouTubeRichTextWithDomFallback(client, expectedTitle, expectedBody).catch((error) => ({
+      filled: false,
+      reason: "youtube_dom_fallback_error",
+      message: String(error?.message || error || ""),
+      actions: [],
+      verified_title: false,
+      verified_body: false,
+      actual_title: actualTitle,
+      actual_body: actualBody,
+    }));
+    actions.push({
+      field: "dom_fallback",
+      ...fallback,
+    });
+    const fallbackSaveStatus = await waitForYouTubeStudioSave(client, 18000);
+    const fallbackAfter = await inspectYouTubeRichTextTargets(client, expectedTitle, expectedBody).catch(() => null);
+    finalActualTitle = String(fallbackAfter?.title_target?.actual || fallback?.actual_title || "").trim();
+    finalActualBody = String(fallbackAfter?.body_target?.actual || fallback?.actual_body || "").trim();
+    finalRoute = fallbackAfter?.route || finalRoute;
+    finalCandidates = fallbackAfter?.candidates || fallback?.candidates || finalCandidates;
+    verifiedTitle = !expectedTitle || richTextDraftValueMatches(finalActualTitle, expectedTitle);
+    verifiedBody = !expectedBody || richTextDraftValueMatches(finalActualBody, expectedBody);
+    fallback = {
+      ...fallback,
+      save_status: fallbackSaveStatus,
+      verified_title: verifiedTitle,
+      verified_body: verifiedBody,
+      actual_title: finalActualTitle,
+      actual_body: finalActualBody,
+    };
+  }
   return {
-    filled: actions.some((item) => item.filled),
-    input_mode: "native_cdp_input",
+    filled: verifiedTitle && verifiedBody,
+    input_mode: fallback ? "native_cdp_input_with_dom_fallback" : "native_cdp_input",
     actions,
     save_status: saveStatus,
     save_status_verified: Boolean(saveStatus?.saved),
-    verified_title: !expectedTitle || richTextDraftValueMatches(actualTitle, expectedTitle),
-    verified_body: !expectedBody || richTextDraftValueMatches(actualBody, expectedBody),
-    actual_title: actualTitle,
-    actual_body: actualBody,
-    route: after?.route || before?.route || {},
-    candidates: after?.candidates || before?.candidates || [],
+    fallback,
+    verified_title: verifiedTitle,
+    verified_body: verifiedBody,
+    actual_title: finalActualTitle,
+    actual_body: finalActualBody,
+    route: finalRoute,
+    candidates: finalCandidates,
   };
 }
 
@@ -30719,6 +31015,18 @@ function sidecarOptionGroupsForMerge(platform, tab, groups) {
 export function buildPublicationHealthPayload({ cdpStatus = "ok", cdpError = "", creatorSessions = {} } = {}) {
   const normalizedCreatorSessions = creatorSessions && typeof creatorSessions === "object" ? creatorSessions : {};
   const bridgeTarget = bridgeTargetDescriptor();
+  const platformRouteCapability = Object.fromEntries(
+    [...new Set([...COMPOSITE_PUBLISH_PLATFORMS, ...FINAL_PUBLISH_PLATFORMS])]
+      .map((platform) => [
+        platform,
+        {
+          publish_entry_url: resolvePlatformPublishEntryUrl(platform, [], {}),
+          receipt_entry_url: String(PLATFORM_RECEIPT_ENTRY_URLS[platform] || "").trim(),
+          auto_create_platform_tabs: true,
+          task_owned_platform_page: true,
+        },
+      ]),
+  );
   return {
     status: "ok",
     contract: CONTRACT,
@@ -30749,6 +31057,8 @@ export function buildPublicationHealthPayload({ cdpStatus = "ok", cdpError = "",
       supervised_draft_prepare: true,
       profile_reuse: Boolean(ATTACHED_PROFILE_ID),
       auto_create_platform_tabs: Boolean(ALLOW_PUBLICATION_TAB_AUTOCREATE),
+      task_owned_platform_pages: true,
+      platform_route_capability: platformRouteCapability,
       profile_binding_mode: ATTACHED_PROFILE_ID ? "persistent_profile" : "cdp_only",
       reusable_profile_ids: ATTACHED_PROFILE_ID ? [ATTACHED_PROFILE_ID] : [],
       session_binding_enforced: true,

@@ -617,6 +617,7 @@ def resolve_packaging_plan_for_job(
     insert = _resolve_insert_asset(assets_by_id, config, job_id, content_profile=content_profile)
     watermark = _resolve_single_asset(assets_by_id, config.get("watermark_asset_id"), expected_type="watermark")
     music = _resolve_music_asset(assets_by_id, config, job_id, content_profile=content_profile)
+    creator_assets_by_id = _creator_packaging_assets_by_id(creator_assets or [])
     creator_packaging_assets = _resolve_creator_packaging_assets(
         creator_assets or [],
         job_id=job_id,
@@ -643,7 +644,11 @@ def resolve_packaging_plan_for_job(
                 "selection_mode": config["music_selection_mode"],
                 "loop_mode": config["music_loop_mode"],
                 "volume": config["music_volume"],
-                "candidate_paths": [assets_by_id[item]["path"] for item in music.get("candidate_asset_ids", []) if item in assets_by_id],
+                "candidate_paths": [
+                    {**assets_by_id, **creator_assets_by_id}[item]["path"]
+                    for item in music.get("candidate_asset_ids", [])
+                    if item in {**assets_by_id, **creator_assets_by_id}
+                ],
             }
         )
 

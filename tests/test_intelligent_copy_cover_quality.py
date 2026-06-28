@@ -59,6 +59,25 @@ def test_completed_codex_cover_with_existing_matching_file_is_publish_ready(tmp_
     assert result["image_dimensions"] == {"width": 1080, "height": 1920}
 
 
+def test_materialized_host_smart_copy_copy_matches_output_request_path(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "host-intelligent-copy" / "abc-demo" / "smart-copy" / "_cover" / "00-cover.jpg"
+    output.parent.mkdir(parents=True)
+    output.write_bytes(b"generated")
+    request = _request(output)
+    request["output_path"] = "/app/data/output/demo/smart-copy/_cover/00-cover.jpg"
+
+    monkeypatch.setattr(quality, "_read_image_dimensions", lambda path: (1080, 1920, None))
+
+    result = quality.assess_cover_publish_readiness(
+        _metadata(output),
+        request,
+        output,
+    )
+
+    assert result["publish_ready"] is True
+    assert not any("output_path 与待发布文件不一致" in reason for reason in result["blocking_reasons"])
+
+
 def test_cover_quality_accepts_stale_metadata_pending_when_request_completed(tmp_path, monkeypatch) -> None:
     output = tmp_path / "cover.jpg"
     output.write_bytes(b"generated")

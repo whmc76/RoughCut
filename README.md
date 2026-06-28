@@ -13,7 +13,7 @@ probe -> extract_audio -> transcribe -> subtitle_postprocess
       -> subtitle_term_resolution -> subtitle_consistency_review
       -> glossary_review -> transcript_review -> subtitle_translation
       -> content_profile -> summary_review -> ai_director
-      -> avatar_commentary -> edit_plan -> render
+      -> avatar_commentary -> edit_plan -> chapter_analysis -> render
 ```
 
 The system is optimized for repeatable local production: every job step is
@@ -31,6 +31,8 @@ contract instead of becoming browser-only state.
   glossary corrections, translation, and timing projection.
 - Content understanding: builds product/topic profiles from transcript,
   visual evidence, OCR, source context, and memory.
+- Chapter analysis: after edit planning, a separate LLM step derives semantic
+  chapters from the edited ASR timeline for optional packaging overlays.
 - Manual editor: waveform regions, subtitle table editing, timing tools,
   thumbnail strip, revision conflict protection, and subtitle-only rerun paths.
 - Packaging: manages intros, outros, watermarks, BGM, creator assets, and
@@ -320,7 +322,7 @@ The manual editor is documented in
 
 Current behavior:
 
-- Opens once `edit_plan` and earlier prerequisites are available.
+- Opens once `edit_plan`, `chapter_analysis`, and earlier prerequisites are available.
 - Uses waveform regions for keep segments.
 - Projects subtitles from source time to output time.
 - Supports subtitle text/timing edits, split, merge, shift, nudge, and
@@ -329,7 +331,10 @@ Current behavior:
   segments.
 - Protects saves with optimistic revision checks.
 - Classifies edits as timeline changes, subtitle-only changes, or no material
-  change.
+  change; optional packaging-only changes rerun render without rebuilding the
+  editorial timeline.
+- Can toggle the ASR-semantic segmented progress bar as an add-on packaging
+  overlay; disabling it and rerendering removes the bar from the final video.
 - Reruns render through backend contracts instead of persisting UI-only state.
 
 ## Publication Flow

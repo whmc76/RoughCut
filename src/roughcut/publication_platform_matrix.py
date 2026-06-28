@@ -37,6 +37,27 @@ def platform_publish_scheme(platform: str | None) -> dict[str, Any]:
     return dict(raw_scheme) if isinstance(raw_scheme, dict) else {}
 
 
+def platform_content_contract(platform: str | None) -> dict[str, Any]:
+    capabilities = publication_platform_capabilities(platform)
+    raw_contract = capabilities.get("content_contract")
+    contract = dict(raw_contract) if isinstance(raw_contract, dict) else {}
+    project_keys = platform_publish_project_keys(platform)
+    if "has_title" not in contract:
+        contract["has_title"] = "title" in project_keys
+    if "separate_tags" not in contract:
+        contract["separate_tags"] = "tags" in project_keys or "topics" in project_keys
+    if "tags_embedded_in_body" not in contract:
+        contract["tags_embedded_in_body"] = False
+    contract.setdefault("title_label", "标题" if contract.get("has_title") else "")
+    contract.setdefault("body_label", "正文")
+    contract.setdefault("tag_label", "标签" if contract.get("separate_tags") else "")
+    contract.setdefault("title_limit", 0 if not contract.get("has_title") else 80)
+    contract.setdefault("body_limit", 0)
+    contract.setdefault("tag_limit", 0 if not contract.get("separate_tags") and not contract.get("tags_embedded_in_body") else 6)
+    contract.setdefault("tag_style", "")
+    return contract
+
+
 def publication_collection_policy_skip_values() -> set[str]:
     matrix = load_publication_platform_matrix()
     return {
@@ -159,6 +180,49 @@ def platform_publish_projects(platform: str | None) -> list[dict[str, str]]:
     return normalized
 
 
+def platform_publish_project_keys(platform: str | None) -> set[str]:
+    return {
+        str(item.get("key") or "").strip()
+        for item in platform_publish_projects(platform)
+        if str(item.get("key") or "").strip()
+    }
+
+
+def platform_publish_completion_requirements(platform: str | None) -> dict[str, Any]:
+    raw_requirements = platform_publish_scheme(platform).get("completion_requirements")
+    return dict(raw_requirements) if isinstance(raw_requirements, dict) else {}
+
+
+def platform_requires_title_entry(platform: str | None) -> bool:
+    contract = platform_content_contract(platform)
+    if "has_title" in contract:
+        return bool(contract.get("has_title"))
+    requirements = platform_publish_completion_requirements(platform)
+    if "title_required" in requirements:
+        return bool(requirements.get("title_required"))
+    return "title" in platform_publish_project_keys(platform)
+
+
+def platform_requires_body_entry(platform: str | None) -> bool:
+    contract = platform_content_contract(platform)
+    if "body_required" in contract:
+        return bool(contract.get("body_required"))
+    requirements = platform_publish_completion_requirements(platform)
+    if "body_required" in requirements:
+        return bool(requirements.get("body_required"))
+    if "body_with_embedded_tags" in requirements:
+        return bool(requirements.get("body_with_embedded_tags"))
+    return "body" in platform_publish_project_keys(platform)
+
+
+def platform_has_separate_tag_entry(platform: str | None) -> bool:
+    return bool(platform_content_contract(platform).get("separate_tags"))
+
+
+def platform_tags_embedded_in_body(platform: str | None) -> bool:
+    return bool(platform_content_contract(platform).get("tags_embedded_in_body"))
+
+
 def platform_supports_scheduled_publish(platform: str | None) -> bool:
     capabilities = publication_platform_capabilities(platform)
     if "supports_scheduled_publish" not in capabilities:
@@ -203,7 +267,10 @@ def platform_skips_explicit_visibility_entry(platform: str | None) -> bool:
 
 
 def platform_manual_handoff_only(platform: str | None) -> bool:
-    return bool(publication_platform_capabilities(platform).get("manual_handoff_only"))
+    capabilities = publication_platform_capabilities(platform)
+    return bool(capabilities.get("manual_handoff_only")) or bool(
+        capabilities.get("material_generation_only")
+    ) or not platform_auto_publish_supported(platform)
 
 
 def platform_manual_publish_entry_url(platform: str | None) -> str:

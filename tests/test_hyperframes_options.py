@@ -6,14 +6,14 @@ from roughcut.api.jobs import (
 from roughcut import hyperframes
 
 
-def test_hyperframes_options_default_all_visual_features_enabled() -> None:
+def test_hyperframes_options_default_keeps_progress_bar_as_optional_addon() -> None:
     options = _normalize_hyperframes_options_payload(None)
 
     assert options == {
         "smart_effects": True,
         "subtitle_emphasis": True,
         "sound_cues": True,
-        "progress_bar": True,
+        "progress_bar": False,
         "chapter_cards": True,
         "unified_subtitle_style": True,
     }
@@ -47,11 +47,27 @@ def test_hyperframes_chapter_cards_render_as_bottom_chapter_pills() -> None:
     assert chapter_elements[0]["position"]["y"] >= 980
 
 
+def test_hyperframes_progress_bar_is_absent_until_selected() -> None:
+    default_plan = hyperframes.build_render_plan(width=1920, height=1080, duration_sec=30.0)
+    enabled_plan = hyperframes.build_render_plan(
+        width=1920,
+        height=1080,
+        duration_sec=30.0,
+        options={"progress_bar": True},
+    )
+
+    assert not hyperframes.progress_bar_enabled(default_plan)
+    assert [item for item in default_plan["elements"] if item.get("track") == "progress_bar"] == []
+    assert hyperframes.progress_bar_enabled(enabled_plan)
+    assert [item for item in enabled_plan["elements"] if item.get("track") == "progress_bar"]
+
+
 def test_hyperframes_chapters_derive_from_subtitle_section_roles() -> None:
     plan = hyperframes.build_render_plan(
         width=1920,
         height=1080,
         duration_sec=24.0,
+        options={"progress_bar": True},
         subtitle_items=[
             {"start_time": 0.0, "end_time": 2.0, "text_final": "先看整体", "subtitle_section_role": "hook"},
             {"start_time": 3.0, "end_time": 6.0, "text_final": "这里看结构", "subtitle_section_role": "detail"},

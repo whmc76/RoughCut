@@ -4,7 +4,12 @@ import pytest
 
 from roughcut.edit.manual_editor_contract import manual_editor_is_subtitle_only_render
 from roughcut.edit import render_plan as render_plan_module
-from roughcut.edit.render_plan import build_ai_effect_render_plan, build_render_plan, build_smart_editing_accents
+from roughcut.edit.render_plan import (
+    build_ai_effect_render_plan,
+    build_plain_render_plan,
+    build_render_plan,
+    build_smart_editing_accents,
+)
 from roughcut.media import render as render_module
 from roughcut.media.render import (
     _apply_packaging_plan,
@@ -225,6 +230,30 @@ def test_ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only(monk
     ]
 
 
+def test_plain_render_plan_removes_nested_packaging_assets() -> None:
+    plan = build_render_plan(
+        "00000000-0000-0000-0000-000000000000",
+        intro={"path": "intro.mp4"},
+        insert={"path": "insert.mp4"},
+        watermark={"path": "watermark.png"},
+        music={"path": "music.mp3"},
+    )
+
+    plain = build_plain_render_plan(plan)
+    nested_packaging = plain["packaging_timeline"]["packaging"]
+
+    assert plain["intro"] is None
+    assert plain["insert"] is None
+    assert plain["watermark"] is None
+    assert plain["music"] is None
+    assert nested_packaging["intro"] is None
+    assert nested_packaging["insert"] is None
+    assert nested_packaging["watermark"] is None
+    assert nested_packaging["music"] is None
+    assert plain["packaging_timeline"]["subtitles"] is None
+    assert plain["packaging_timeline"]["hyperframes"] is None
+
+
 def test_manual_editor_subtitle_only_contract_is_shared_with_render() -> None:
     assert manual_editor_is_subtitle_only_render(
         {
@@ -290,7 +319,7 @@ def test_render_packaging_context_reads_nested_packaging_timeline_payload() -> N
     assert context["assets"]["music"]["audio_cues"][0]["kind"] == "bgm_entry"
     assert context["audio_cues"][0]["kind"] == "bgm_entry"
     assert context["hyperframes"]["schema"] == HYPERFRAMES_PLAN_SCHEMA
-    assert "progress_bar" in set(context["hyperframes"]["tracks"])
+    assert "progress_bar" not in set(context["hyperframes"]["tracks"])
 
 
 def test_render_packaging_context_reuses_local_assets_for_presence() -> None:
@@ -368,11 +397,24 @@ def test_render_plan_uses_hyperframes_as_visual_timeline() -> None:
     assert plan["hyperframes"]["metadata"]["effects"]["style"] == "smart_effect_punch"
 
 
+def test_render_plan_persists_optional_progress_bar_packaging_flag() -> None:
+    plan = build_render_plan(
+        "00000000-0000-0000-0000-000000000000",
+        hyperframes_options={"progress_bar": True},
+    )
+
+    assert plan["hyperframes_options"]["progress_bar"] is True
+    assert plan["packaging_timeline"]["hyperframes_options"]["progress_bar"] is True
+    assert plan["hyperframes"]["metadata"]["options"]["progress_bar"] is True
+    assert "progress_bar" in set(plan["hyperframes"]["tracks"])
+
+
 def test_hyperframes_progress_filter_draws_real_chapter_segments() -> None:
     plan = hyperframes_module.build_render_plan(
         width=1920,
         height=1080,
         duration_sec=12.0,
+        options={"progress_bar": True},
         subtitle_items=[
             {"start_time": 0.0, "end_time": 2.0, "text_final": "先看整体", "subtitle_section_role": "hook", "section_title": "开场完整段落名称"},
             {"start_time": 3.0, "end_time": 6.0, "text_final": "结构细节", "subtitle_section_role": "detail", "section_title": "结构细节完整段落名称"},
@@ -398,11 +440,69 @@ def test_hyperframes_progress_filter_draws_real_chapter_segments() -> None:
     assert "h=45" in filter_text
     assert "vhfprogresschaptertick1" in filter_text
     assert "vhfprogresschaptertitle1" in filter_text
-    assert "text='结构细节完整段落名称'" in filter_text
+    assert "text='结构细节'" in filter_text
+    assert "结构细节完整段落名称" not in filter_text
     assert "text='细节'" not in filter_text
     assert "color=0x28d3a2" not in filter_text
     assert "color=0x4f8cff" not in filter_text
     assert "color=white@0.58" in filter_text
+
+
+def test_hyperframes_progress_filter_prefers_llm_chapter_analysis() -> None:
+    plan = hyperframes_module.build_render_plan(
+        width=1920,
+        height=1080,
+        duration_sec=30.0,
+        chapter_analysis={
+            "source": "llm_chapter_analysis",
+            "chapters": [
+                {"start_sec": 0.0, "end_sec": 8.0, "title": "品牌产品名介绍"},
+                {"start_sec": 8.0, "end_sec": 18.0, "title": "肩带使用方法"},
+                {"start_sec": 18.0, "end_sec": 30.0, "title": "分仓特点"},
+            ],
+        },
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 2.0, "text_final": "字幕开头", "subtitle_section_role": "hook", "section_title": "旧开场"},
+            {"start_time": 8.0, "end_time": 12.0, "text_final": "字幕细节", "subtitle_section_role": "detail", "section_title": "旧细节"},
+        ],
+    )
+
+    chapters = hyperframes_module.chapter_segments(plan)
+
+    assert [item["title"] for item in chapters] == ["品牌产品名介绍", "肩带使用方法", "分仓特点"]
+    assert {item["source"] for item in chapters} == {"llm_chapter_analysis"}
+
+
+def test_hyperframes_progress_filter_prefers_llm_short_chapter_titles() -> None:
+    plan = hyperframes_module.build_render_plan(
+        width=1920,
+        height=1080,
+        duration_sec=24.0,
+        options={"progress_bar": True},
+        chapter_analysis={
+            "source": "llm_chapter_analysis",
+            "chapters": [
+                {"start_sec": 0.0, "end_sec": 8.0, "title_short": "定位差异", "title": "这是一个新的物种本质上的区别的甚至可以说"},
+                {"start_sec": 8.0, "end_sec": 16.0, "title_short": "背带调节", "title": "这里主要讲这个肩带到底怎么调节和快拆"},
+                {"start_sec": 16.0, "end_sec": 24.0, "title_short": "收纳层次", "title": "然后这个包里面的分仓和拉链口袋比较多"},
+            ],
+        },
+    )
+
+    chapters = hyperframes_module.chapter_segments(plan)
+    filter_parts, _video_label = _build_hyperframes_visual_filters(
+        "v0",
+        plan,
+        render_w=1920,
+        render_h=1080,
+    )
+    filter_text = ";".join(filter_parts)
+
+    assert [item["title"] for item in chapters] == ["定位差异", "背带调节", "收纳层次"]
+    assert "这是一个新的物种" not in filter_text
+    assert "text='背带调节'" in filter_text
+    assert "肩带使用" not in filter_text
+    assert "分仓收纳" not in filter_text
 
 
 def test_smart_editing_accents_use_social_packaging_density_by_default() -> None:
@@ -1223,6 +1323,45 @@ async def test_apply_timed_overlays_reuses_passed_choreographed_subtitles(
 
 
 @pytest.mark.asyncio
+async def test_apply_timed_overlays_sets_muxing_queue_for_filtered_video(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "roughcut.media.render._probe_video_stream",
+        lambda _source_path: {"width": 1920, "height": 1080, "display_width": 1920, "display_height": 1080},
+    )
+    monkeypatch.setattr("roughcut.media.render._probe_duration", lambda _source_path: 3.0)
+    monkeypatch.setattr("roughcut.media.render._append_delivery_color_filter", lambda parts, input_label, _source_info, output_label: input_label)
+
+    async def _fake_build_timed_overlay_filter_chain(**kwargs):
+        return ["[0:v]drawtext=text='demo'[vout]"], "vout", kwargs["audio_label"]
+
+    async def _fake_run_process(cmd, **_kwargs):
+        captured["cmd"] = list(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("roughcut.media.render._build_timed_overlay_filter_chain", _fake_build_timed_overlay_filter_chain)
+    monkeypatch.setattr("roughcut.media.render._run_process", _fake_run_process)
+
+    output_path = await _apply_timed_overlays_to_video(
+        tmp_path / "source.mp4",
+        output_path=tmp_path / "overlay.mp4",
+        render_plan={},
+        subtitle_items=[],
+        overlay_editing_accents={"emphasis_overlays": []},
+        debug_dir=None,
+        avatar_plan={"mode": "full_track_audio_passthrough"},
+    )
+
+    cmd_text = " ".join(str(part) for part in captured["cmd"])
+    assert output_path == tmp_path / "overlay.mp4"
+    assert "-max_muxing_queue_size 4096" in cmd_text
+
+
+@pytest.mark.asyncio
 async def test_apply_timed_overlays_reuses_passed_overlay_plan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -1350,6 +1489,15 @@ def test_default_text_watermark_plan_is_available_for_final_render_plans() -> No
     assert plan["motion"] == "dynamic_float"
 
 
+def test_default_text_watermark_plan_uses_low_intrusion_fallback_without_creator_name() -> None:
+    plan = _default_dynamic_text_watermark_plan({})
+
+    assert plan is not None
+    assert plan["text"] == "RoughCut"
+    assert plan["dynamic"] is True
+    assert plan["motion"] == "dynamic_float"
+
+
 def test_text_watermark_plan_normalization_does_not_require_image_asset() -> None:
     plan = _normalize_watermark_plan({"text": "RoughCut", "opacity": 0.4, "scale": 0.2})
 
@@ -1399,6 +1547,122 @@ async def test_apply_music_and_watermark_renders_dynamic_watermark(monkeypatch: 
 
 
 @pytest.mark.asyncio
+async def test_apply_music_and_watermark_falls_back_to_software_encode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    calls: list[list[object]] = []
+
+    monkeypatch.setattr("roughcut.media.render._probe_duration", lambda _path: 3.0)
+    monkeypatch.setattr(
+        "roughcut.media.render._resolve_video_encoder",
+        lambda *, prefer_hardware: "h264_nvenc" if prefer_hardware else "libx264",
+    )
+
+    async def _fake_run_process(cmd, **_kwargs):
+        calls.append(list(cmd))
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=255, stdout="", stderr="hardware encoder interrupted")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("roughcut.media.render._run_process", _fake_run_process)
+
+    output = await _apply_music_and_watermark(
+        tmp_path / "source.mp4",
+        music_plan=None,
+        watermark_plan={"path": "watermark.png"},
+        expected_width=1920,
+        expected_height=1080,
+        output_path=tmp_path / "out.mp4",
+        debug_dir=None,
+    )
+
+    first_cmd = " ".join(str(part) for part in calls[0])
+    fallback_cmd = " ".join(str(part) for part in calls[1])
+    assert output == tmp_path / "out.mp4"
+    assert len(calls) == 2
+    assert "h264_nvenc" in first_cmd
+    assert "libx264" in fallback_cmd
+
+
+@pytest.mark.asyncio
+async def test_apply_music_and_watermark_skips_noncritical_watermark_after_encode_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    calls: list[list[object]] = []
+
+    monkeypatch.setattr("roughcut.media.render._probe_duration", lambda _path: 3.0)
+    monkeypatch.setattr(
+        "roughcut.media.render._resolve_video_encoder",
+        lambda *, prefer_hardware: "h264_nvenc" if prefer_hardware else "libx264",
+    )
+
+    async def _fake_run_process(cmd, **_kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=-9, stdout="", stderr="killed")
+
+    monkeypatch.setattr("roughcut.media.render._run_process", _fake_run_process)
+
+    source_path = tmp_path / "source.mp4"
+    output = await _apply_music_and_watermark(
+        source_path,
+        music_plan=None,
+        watermark_plan={"path": "watermark.png"},
+        expected_width=1920,
+        expected_height=1080,
+        output_path=tmp_path / "out.mp4",
+        debug_dir=tmp_path,
+    )
+
+    assert output == source_path
+    assert len(calls) == 2
+    assert (tmp_path / "packaging.watermark_skipped.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_apply_music_and_watermark_splits_audio_mix_from_overlay(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    calls: list[list[object]] = []
+
+    monkeypatch.setattr("roughcut.media.render._probe_duration", lambda _path: 3.0)
+
+    async def _fake_run_process(cmd, **_kwargs):
+        calls.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("roughcut.media.render._run_process", _fake_run_process)
+
+    output = await _apply_music_and_watermark(
+        tmp_path / "source.mp4",
+        music_plan={"path": str(tmp_path / "music.mp3"), "volume": 0.12},
+        watermark_plan={"path": "watermark.png"},
+        expected_width=1920,
+        expected_height=1080,
+        output_path=tmp_path / "out.mp4",
+        debug_dir=None,
+    )
+
+    music_cmd = " ".join(str(part) for part in calls[0])
+    watermark_cmd = " ".join(str(part) for part in calls[1])
+    assert output == tmp_path / "out.mp4"
+    assert len(calls) == 2
+    assert "amix=inputs=2" in music_cmd
+    assert "-c:v copy" not in music_cmd
+    assert "-ar 48000" in music_cmd
+    assert "-ac 2" in music_cmd
+    assert "-max_muxing_queue_size 4096" in music_cmd
+    assert "overlay=x='" not in music_cmd
+    assert "overlay=x='" in watermark_cmd
+    assert "amix=inputs=2" not in watermark_cmd
+    assert "-c:a copy" not in watermark_cmd
+    assert "-ar 48000" in watermark_cmd
+    assert "-ac 2" in watermark_cmd
+
+
+@pytest.mark.asyncio
 async def test_apply_music_and_watermark_skips_duplicate_existing_image_watermark(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -1432,7 +1696,7 @@ async def test_apply_music_and_watermark_skips_duplicate_existing_image_watermar
     assert output == tmp_path / "out.mp4"
     assert "watermark.png" not in cmd_text
     assert "overlay=x='" not in cmd_text
-    assert "sidechaincompress" in cmd_text
+    assert "amix=inputs=2" in cmd_text
 
 
 @pytest.mark.asyncio

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from roughcut.publication_platform_matrix import (
+    platform_content_contract,
     platform_allows_field_edits_while_processing,
     platform_cover_project_mode,
     platform_cover_asset_policy,
     platform_draft_resume_policy,
     platform_publish_entry_url,
+    platform_publish_project_keys,
     platform_publish_projects,
+    platform_requires_body_entry,
+    platform_requires_title_entry,
+    platform_has_separate_tag_entry,
+    platform_tags_embedded_in_body,
     platform_skips_explicit_tag_entry,
     platform_skips_explicit_visibility_entry,
     platform_stop_when_current_page_already_correct,
@@ -50,10 +56,29 @@ def test_bilibili_requires_dual_cover_slots_with_4_3_primary() -> None:
 
 def test_kuaishou_skips_explicit_tag_and_visibility_projects() -> None:
     projects = [item["key"] for item in platform_publish_projects("kuaishou")]
+    assert platform_publish_project_keys("kuaishou") == set(projects)
+    assert platform_requires_title_entry("kuaishou") is False
+    assert platform_requires_body_entry("kuaishou") is True
+    assert platform_has_separate_tag_entry("kuaishou") is False
+    assert platform_tags_embedded_in_body("kuaishou") is True
     assert "tags" not in projects
     assert "visibility" not in projects
     assert platform_skips_explicit_tag_entry("kuaishou") is True
     assert platform_skips_explicit_visibility_entry("kuaishou") is True
+
+
+def test_platform_content_contract_matches_real_publish_fields() -> None:
+    assert platform_content_contract("bilibili")["has_title"] is True
+    assert platform_content_contract("douyin")["title_label"] == "作品标题"
+    assert platform_content_contract("xiaohongshu")["tag_label"] == "话题"
+    assert platform_content_contract("youtube")["body_label"] == "说明"
+
+    for platform in ("kuaishou", "wechat-channels", "x"):
+        contract = platform_content_contract(platform)
+        assert contract["has_title"] is False
+        assert contract["separate_tags"] is False
+        assert contract["tags_embedded_in_body"] is True
+        assert platform_requires_title_entry(platform) is False
 
 
 def test_kuaishou_mainline_publish_scheme_only_uses_main_cover_path_and_stops_when_page_is_already_correct() -> None:

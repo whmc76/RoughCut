@@ -11,6 +11,7 @@ CAPTION_PACKAGE_SCHEMA = "roughcut.remix.caption_package.v1"
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
 DEFAULT_WATERMARK = "RoughCut"
+CHILDREN_STORYBOOK_DEFAULT_WATERMARK = "Demo Parenting"
 CAPTION_STYLE_PROFILE = "jianying_reference_v2"
 CHILDREN_STORYBOOK_STYLE_PROFILE = "children_storybook_v1"
 SUPPORTED_CAPTION_STYLE_PROFILES = {CAPTION_STYLE_PROFILE, CHILDREN_STORYBOOK_STYLE_PROFILE}
@@ -89,6 +90,8 @@ def build_caption_package(
     original_audio_insertions: Sequence[dict[str, Any]] | None = None,
 ) -> CaptionPackage:
     style_profile = normalize_caption_style_profile(subtitle_style_profile)
+    if watermark == DEFAULT_WATERMARK and style_profile == CHILDREN_STORYBOOK_STYLE_PROFILE:
+        watermark = CHILDREN_STORYBOOK_DEFAULT_WATERMARK
     semantic_plan = normalize_semantic_packaging_plan(
         semantic_packaging_plan,
         subtitle_timings=subtitle_timings,

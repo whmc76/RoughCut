@@ -1,0 +1,23 @@
+{
+  "schema": "roughcut.creator_profile.v1",
+  "id": "demo_creator",
+  "slug": "demo_creator",
+  "name": "Demo Creator",
+  "tts_defaults": {
+    "provider": "moss_tts_local",
+    "mode": "moss_voice_clone",
+    "reference_history_path": "/app/data/tools/reference-uploads/读绘本试音-2.mp3",
+    "prompt_text": "明亮互动版，小朋友们看这里，这是什么颜色呢？对啦，是黄色，黄。"
+  },
+  "remix_style": {
+    "caption": {
+      "subtitle_style_profile": "children_storybook_v1"
+    }
+  },
+  "remix_task_bindings": [
+    {
+      "task_id": "example_script_footage_remix",
+      "production_manifest_path": "data/remix_production_tasks/example_remix_pending.json"
+    }
+  ]
+}

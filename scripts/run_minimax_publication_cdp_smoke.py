@@ -106,7 +106,7 @@ def _backend_smoke_status(
     plan_status = publication_plan_status(plan)
     if plan_status == "manual_handoff":
         return "manual_handoff"
-    if not publication_plan_is_publishable(plan):
+    if plan_status != "ready" or plan.get("publish_ready") is False or not bool(plan.get("targets")):
         return "blocked"
     expected_target_count = len(plan.get("targets") or []) or platform_count
     if (

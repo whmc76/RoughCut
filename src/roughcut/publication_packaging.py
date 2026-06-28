@@ -12,7 +12,9 @@ from roughcut.intelligent_copy_layout import (
 from roughcut.publication_platform_matrix import (
     publication_collection_policy_skip_values,
     normalize_publication_platform_name,
+    platform_requires_body_entry,
     platform_requires_explicit_collection_policy,
+    platform_requires_title_entry,
     platform_required_cover_slots,
     platform_manual_handoff_only,
     platform_manual_publish_entry_url,
@@ -501,6 +503,17 @@ def normalize_publication_packaging_payload(
             entry["scheduled_publish_at"] = scheduled_publish_at
         if isinstance(item.get("copy_material"), dict) and item.get("copy_material"):
             entry["copy_material"] = dict(item.get("copy_material") or {})
+        for field in (
+            "has_title",
+            "title_label",
+            "body_label",
+            "tag_label",
+            "separate_tags",
+            "tags_embedded_in_body",
+            "constraints",
+        ):
+            if field in item:
+                entry[field] = item.get(field)
         if isinstance(item.get("live_publish_preflight"), dict) and item.get("live_publish_preflight"):
             entry["live_publish_preflight"] = dict(item.get("live_publish_preflight") or {})
         if isinstance(item.get("platform_specific_overrides"), dict) and item.get("platform_specific_overrides"):
@@ -761,8 +774,10 @@ def publication_packaging_entry_blocking_reasons(entry: dict[str, Any]) -> list[
     manual_handoff_only = bool(entry.get("manual_handoff_only")) or platform_manual_handoff_only(platform)
     if manual_handoff_only:
         return list(dict.fromkeys(blocking_reasons))
-    if not _publication_packaging_entry_has_title(entry):
+    if _publication_packaging_entry_requires_title(entry, platform) and not _publication_packaging_entry_has_title(entry):
         blocking_reasons.append("标题为空，不能自动发布。")
+    if _publication_packaging_entry_requires_body(entry, platform) and not _publication_packaging_entry_has_body(entry):
+        blocking_reasons.append("正文/说明为空，不能自动发布。")
     metadata_contract_fields = (
         "declaration",
         "category",
@@ -843,6 +858,35 @@ def _publication_packaging_entry_has_title(entry: dict[str, Any]) -> bool:
     titles = entry.get("titles")
     if isinstance(titles, list):
         return any(str(title or "").strip() for title in titles)
+    return False
+
+
+def _publication_packaging_entry_requires_title(entry: dict[str, Any], platform: str) -> bool:
+    if "has_title" in entry:
+        return bool(entry.get("has_title"))
+    copy_material = entry.get("copy_material") if isinstance(entry.get("copy_material"), dict) else {}
+    if "has_title" in copy_material:
+        return bool(copy_material.get("has_title"))
+    constraints = entry.get("constraints") if isinstance(entry.get("constraints"), dict) else {}
+    try:
+        title_limit = int(constraints.get("title_limit"))
+    except (TypeError, ValueError):
+        title_limit = None
+    if title_limit is not None and title_limit <= 0:
+        return False
+    return platform_requires_title_entry(platform)
+
+
+def _publication_packaging_entry_requires_body(entry: dict[str, Any], platform: str) -> bool:
+    if "has_body" in entry:
+        return bool(entry.get("has_body"))
+    return platform_requires_body_entry(platform)
+
+
+def _publication_packaging_entry_has_body(entry: dict[str, Any]) -> bool:
+    for key in ("description", "body", "full_copy"):
+        if str(entry.get(key) or "").strip():
+            return True
     return False
 
 

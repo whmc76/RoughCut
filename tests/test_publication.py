@@ -1659,12 +1659,14 @@ def test_intelligent_copy_packaging_normalization_accepts_platform_packaging_obj
     assert packaging["publish_ready"] is True
 
 
-def test_intelligent_copy_packaging_normalization_blocks_auto_publish_without_title():
+def test_intelligent_copy_packaging_normalization_respects_kuaishou_no_title_contract():
     packaging = _normalize_intelligent_copy_payload_as_packaging(
         {
             "platforms": {
                 "kuaishou": {
                     "titles": [],
+                    "has_title": False,
+                    "body_label": "作品描述",
                     "description": "正文已经生成，但标题缺失。",
                     "tags": ["EDC17"],
                     "cover_path": "E:/materials/cover.jpg",
@@ -1676,9 +1678,24 @@ def test_intelligent_copy_packaging_normalization_blocks_auto_publish_without_ti
 
     assert packaging is not None
     entry = packaging["platforms"]["kuaishou"]
-    assert entry["publish_ready"] is False
-    assert "标题为空，不能自动发布。" in entry["blocking_reasons"]
-    assert packaging["publish_ready"] is False
+    assert entry["publish_ready"] is True
+    assert "标题为空，不能自动发布。" not in entry["blocking_reasons"]
+    assert entry["body_label"] == "作品描述"
+    assert packaging["publish_ready"] is True
+
+
+def test_publication_material_quality_uses_platform_title_contract_for_kuaishou():
+    reasons = publication._publication_material_quality_blocking_reasons(
+        platform="kuaishou",
+        package={"has_title": False, "description": "快手作品描述已经生成。"},
+        title="",
+        body="快手作品描述已经生成。",
+        cover_path="E:/materials/cover.jpg",
+        cover_slots=[],
+        platform_packaging={"cover_path": "E:/materials/cover.jpg"},
+    )
+
+    assert "标题为空，不能自动发布。" not in reasons
 
 
 def test_intelligent_copy_packaging_normalization_preserves_manual_handoff_contract_from_smart_copy_shape():

@@ -88,6 +88,14 @@ class Job(Base):
     def platform_targets(self) -> list[str]:
         return list(self.platform_targets_json or [])
 
+    @property
+    def creator_card_name(self) -> str | None:
+        creator = self.__dict__.get("creator_card")
+        if creator is None:
+            return None
+        name = str(getattr(creator, "name", "") or "").strip()
+        return name or None
+
 class JobStep(Base):
     __tablename__ = "job_steps"
 

@@ -734,6 +734,7 @@ class IntelligentCopyGenerateIn(BaseModel):
     platforms: list[str] = Field(default_factory=list)
     use_existing_cover: bool = False
     creator_profile_id: str | None = None
+    force_regenerate: bool = False
 
 
 class IntelligentCopyUpgradeIn(BaseModel):
@@ -803,6 +804,8 @@ class IntelligentCopyPlatformMaterialOut(BaseModel):
     title_label: str = "标题"
     body_label: str
     tag_label: str
+    separate_tags: bool = True
+    tags_embedded_in_body: bool = False
     constraints: IntelligentCopyPlatformConstraintsOut = Field(
         default_factory=lambda: IntelligentCopyPlatformConstraintsOut(
             title_limit=0,

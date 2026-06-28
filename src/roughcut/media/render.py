@@ -4,6 +4,7 @@ import asyncio
 import copy
 from contextlib import suppress
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -20,12 +21,10 @@ from roughcut.edit.render_plan import (
     render_plan_avatar_commentary,
     render_plan_delivery,
     render_plan_loudness,
-    render_plan_manual_editor,
     render_plan_video_transform,
     render_plan_voice_processing,
 )
 from roughcut.edit.packaging_timeline import (
-    packaging_timeline_asset_plan,
     packaging_timeline_focus_plan,
     packaging_timeline_hyperframes,
     packaging_timeline_insert_plan,
@@ -41,6 +40,7 @@ from roughcut.packaging.library import (
     resolve_insert_prepare_duration,
     resolve_insert_transition_overlap,
 )
+from roughcut.runtime_paths import resolve_runtime_media_path
 from roughcut.utils.asyncio_subprocess import close_asyncio_subprocess_transport
 
 
@@ -114,6 +114,7 @@ def _render_packaging_context(render_plan: dict[str, Any] | None) -> dict[str, A
         "hyperframes": hyperframes_plan,
         "has_packaging_assets": any(assets.get(key) for key in ("intro", "outro", "insert", "watermark", "music")),
         "focus": packaging_timeline_focus_plan(packaging_timeline),
+        "chapter_analysis": copy.deepcopy(packaging_timeline.get("chapter_analysis") or {}),
         "audio_cues": packaging_timeline_local_audio_cues(packaging_timeline),
         "section_choreography": copy.deepcopy(packaging_timeline.get("section_choreography") or {}),
         "subtitles": copy.deepcopy(packaging_timeline.get("subtitles") or {}),
@@ -179,13 +180,15 @@ def _ffmpeg_filter_thread_args() -> list[str]:
     return ["-filter_threads", str(threads)] if threads > 0 else []
 
 
-def _ffmpeg_encode_thread_args() -> list[str]:
+def _ffmpeg_encode_thread_args(*, default_threads: int | None = None) -> list[str]:
     threads = _bounded_positive_int(getattr(get_settings(), "render_ffmpeg_threads", 0), upper=256)
+    if threads <= 0 and default_threads is not None:
+        threads = _bounded_positive_int(default_threads, upper=256)
     return ["-threads", str(threads)] if threads > 0 else []
 
 
 def _ffmpeg_base_cmd() -> list[str]:
-    return ["ffmpeg", "-y", *_ffmpeg_filter_thread_args()]
+    return ["ffmpeg", "-nostdin", "-y", *_ffmpeg_filter_thread_args()]
 
 
 def _delivery_color_metadata_args() -> list[str]:
@@ -201,14 +204,30 @@ def _delivery_color_metadata_args() -> list[str]:
     ]
 
 
-def _video_delivery_encode_args(*, prefer_hardware: bool = True) -> list[str]:
+def _video_delivery_encode_args(*, prefer_hardware: bool = True, default_threads: int | None = None) -> list[str]:
     return [
-        *_video_encode_args(prefer_hardware=prefer_hardware),
+        *_video_encode_args(prefer_hardware=prefer_hardware, default_threads=default_threads),
         *_delivery_color_metadata_args(),
     ]
 
 
-def _video_encode_args(*, prefer_hardware: bool = True) -> list[str]:
+def _replace_video_encode_args_for_software(cmd: list[str], *, default_threads: int | None = 4) -> list[str]:
+    rewritten = list(cmd)
+    try:
+        start = rewritten.index("-c:v")
+    except ValueError:
+        return rewritten
+    end = start + 2
+    while end < len(rewritten) and rewritten[end] not in {"-c:a", "-t"}:
+        end += 1
+    return [
+        *rewritten[:start],
+        *_video_delivery_encode_args(prefer_hardware=False, default_threads=default_threads),
+        *rewritten[end:],
+    ]
+
+
+def _video_encode_args(*, prefer_hardware: bool = True, default_threads: int | None = None) -> list[str]:
     settings = get_settings()
     encoder = _resolve_video_encoder(prefer_hardware=prefer_hardware)
     if encoder == "h264_qsv":
@@ -265,7 +284,7 @@ def _video_encode_args(*, prefer_hardware: bool = True) -> list[str]:
         str(settings.render_cpu_preset or "veryfast"),
         "-crf",
         str(int(settings.render_crf or 19)),
-        *_ffmpeg_encode_thread_args(),
+        *_ffmpeg_encode_thread_args(default_threads=default_threads),
         "-pix_fmt",
         "yuv420p",
     ]
@@ -691,15 +710,18 @@ async def render_video(
 
     render_voice_processing = resolved_runtime_plan_context["voice_processing"]
     render_loudness = resolved_runtime_plan_context["loudness"]
-    audio_filter = _build_master_audio_filter_chain(
-        input_label=audio_label,
-        voice_processing=render_voice_processing,
-        loudness=render_loudness,
-        output_label="afinal",
-        allow_noise_reduction=True,
-        include_declipping=True,
-        include_async_resample=True,
-    )
+    if bool(resolved_runtime_plan_context.get("audio_already_mastered")):
+        audio_filter = f"[{audio_label}]aresample=async=1:first_pts=0,aformat=sample_rates=48000:channel_layouts=stereo[afinal]"
+    else:
+        audio_filter = _build_master_audio_filter_chain(
+            input_label=audio_label,
+            voice_processing=render_voice_processing,
+            loudness=render_loudness,
+            output_label="afinal",
+            allow_noise_reduction=True,
+            include_declipping=True,
+            include_async_resample=True,
+        )
     filter_parts.append(audio_filter)
     video_map = f"[{video_label}]"
     audio_label = "afinal"
@@ -852,9 +874,6 @@ async def burn_subtitles_on_rendered_video(
     packaging_context: dict[str, Any] | None = None,
 ) -> Path:
     """Burn final subtitles onto an already-rendered candidate without changing audio."""
-    source_info = _probe_video_stream(source_path)
-    render_w = int(source_info.get("display_width") or source_info.get("width") or 0)
-    render_h = int(source_info.get("display_height") or source_info.get("height") or 0)
     subtitle_only_options = {
         key: False
         for key in hyperframes.HYPERFRAMES_OPTION_KEYS
@@ -1931,6 +1950,7 @@ async def _apply_timed_overlays_to_video(
         cmd[-1:-1] = ["-c:a", "copy"]
     else:
         cmd[-1:-1] = _audio_encode_args()
+    cmd[-1:-1] = ["-max_muxing_queue_size", "4096"]
     _write_debug_text(debug_dir, "render.overlays.ffmpeg.txt", _format_command(cmd))
     result = await _run_process(
         cmd,
@@ -2015,26 +2035,56 @@ async def _build_timed_overlay_filter_chain(
             resolved_choreographed_subtitles,
             resolved_hyperframes_plan,
         )
-        write_ass_file(
-            hyperframes_subtitles,
-            ass_path,
-            style_name=hyperframes.subtitle_style_name(
-                resolved_hyperframes_plan,
-                str(resolved_subtitles_plan.get("style") or "bold_yellow_outline"),
-            ),
-            font_name=settings.subtitle_font,
-            font_size=settings.subtitle_font_size,
-            text_color_rgb=settings.subtitle_color,
-            outline_color_rgb=settings.subtitle_outline_color,
-            outline_width=settings.subtitle_outline_width,
-            margin_v_override=subtitle_margin_override,
-            motion_style=hyperframes.subtitle_motion_style(
-                resolved_hyperframes_plan,
-                str(resolved_subtitles_plan.get("motion_style") or "motion_static"),
-            ),
-            play_res_x=render_w,
-            play_res_y=render_h,
+        ass_style_name = hyperframes.subtitle_style_name(
+            resolved_hyperframes_plan,
+            str(resolved_subtitles_plan.get("style") or "bold_yellow_outline"),
         )
+        ass_motion_style = hyperframes.subtitle_motion_style(
+            resolved_hyperframes_plan,
+            str(resolved_subtitles_plan.get("motion_style") or "motion_static"),
+        )
+        ass_cache_dir = (debug_dir / "packaging_subcache") if debug_dir is not None else None
+        ass_fingerprint = {
+            "items": hyperframes_subtitles,
+            "style_name": ass_style_name,
+            "font_name": settings.subtitle_font,
+            "font_size": settings.subtitle_font_size,
+            "text_color_rgb": settings.subtitle_color,
+            "outline_color_rgb": settings.subtitle_outline_color,
+            "outline_width": settings.subtitle_outline_width,
+            "margin_v_override": subtitle_margin_override,
+            "motion_style": ass_motion_style,
+            "play_res_x": render_w,
+            "play_res_y": render_h,
+        }
+        if not await _restore_packaging_subcache(
+            cache_dir=ass_cache_dir,
+            namespace="subtitle_ass",
+            fingerprint=ass_fingerprint,
+            output_path=ass_path,
+            extension=".ass",
+        ):
+            write_ass_file(
+                hyperframes_subtitles,
+                ass_path,
+                style_name=ass_style_name,
+                font_name=settings.subtitle_font,
+                font_size=settings.subtitle_font_size,
+                text_color_rgb=settings.subtitle_color,
+                outline_color_rgb=settings.subtitle_outline_color,
+                outline_width=settings.subtitle_outline_width,
+                margin_v_override=subtitle_margin_override,
+                motion_style=ass_motion_style,
+                play_res_x=render_w,
+                play_res_y=render_h,
+            )
+            await _store_packaging_subcache(
+                cache_dir=ass_cache_dir,
+                namespace="subtitle_ass",
+                fingerprint=ass_fingerprint,
+                output_path=ass_path,
+                extension=".ass",
+            )
         escaped = escape_path_for_ffmpeg_filter(ass_path)
         filter_parts.append(f"[{video_label}]subtitles='{escaped}'[vsub]")
         video_label = "vsub"
@@ -2404,6 +2454,7 @@ def _build_runtime_hyperframes_plan(
         overlay_plan=overlay_plan,
         editing_accents=editing_accents,
         focus_plan=(packaging_context or {}).get("focus") if isinstance(packaging_context, dict) else None,
+        chapter_analysis=(packaging_context or {}).get("chapter_analysis") if isinstance(packaging_context, dict) else None,
         section_choreography=section_choreography,
         audio_cues=(packaging_context or {}).get("audio_cues") if isinstance(packaging_context, dict) else None,
         options=base_metadata.get("options") if isinstance(base_metadata.get("options"), dict) else None,
@@ -2807,6 +2858,7 @@ async def _apply_insert_clip(
         expected_height=expected_height,
         target_fps=target_fps,
         trim_duration_sec=prepare_insert_duration,
+        cache_dir=(debug_dir / "packaging_subcache") if debug_dir is not None else None,
     )
     insert_video_filter, insert_audio_filter = _build_insert_packaging_filter_chain(
         insert_plan=insert_plan,
@@ -2989,6 +3041,7 @@ async def _apply_intro_outro(
             expected_width=expected_width,
             expected_height=expected_height,
             target_fps=target_fps,
+            cache_dir=(debug_dir / "packaging_subcache") if debug_dir is not None else None,
         )
         prepared_paths.append(intro_prepared)
 
@@ -3002,6 +3055,7 @@ async def _apply_intro_outro(
             expected_width=expected_width,
             expected_height=expected_height,
             target_fps=target_fps,
+            cache_dir=(debug_dir / "packaging_subcache") if debug_dir is not None else None,
         )
         prepared_paths.append(outro_prepared)
 
@@ -3016,13 +3070,20 @@ async def _apply_intro_outro(
     concat_inputs = ""
     target_fps_filter = f",fps={_ffmpeg_fps_expr(target_fps)},settb=AVTB" if target_fps > 0 else ""
     for index in range(len(prepared_paths)):
+        segment_duration = max(
+            _probe_duration(prepared_paths[index]),
+            _probe_stream_duration(prepared_paths[index], "video"),
+        )
+        segment_duration = max(segment_duration, 0.1)
         filter_parts.append(
             f"[{index}:v]scale={expected_width}:{expected_height}:force_original_aspect_ratio=decrease,"
             f"pad={expected_width}:{expected_height}:(ow-iw)/2:(oh-ih)/2:black,"
             f"setsar=1,format=yuv420p{target_fps_filter}[v{index}]"
         )
         filter_parts.append(
-            f"[{index}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=N/SR/TB[a{index}]"
+            f"[{index}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+            f"aresample=async=1:first_pts=0,apad=whole_dur={segment_duration:.3f},"
+            f"atrim=start=0:end={segment_duration:.3f},asetpts=N/SR/TB[a{index}]"
         )
         concat_inputs += f"[v{index}][a{index}]"
     cmd.extend(
@@ -3033,7 +3094,7 @@ async def _apply_intro_outro(
             "[vout]",
             "-map",
             "[aout]",
-            *_video_delivery_encode_args(),
+            *_video_delivery_encode_args(prefer_hardware=False, default_threads=2),
             *_audio_encode_args(),
             str(output_path),
         ]
@@ -3049,7 +3110,10 @@ async def _apply_intro_outro(
     )
     _write_process_debug(debug_dir, "packaging.bookends", result)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg intro/outro packaging failed: {result.stderr[-2000:]}")
+        raise RuntimeError(
+            "ffmpeg intro/outro packaging failed: "
+            f"returncode={result.returncode}; stderr_tail={result.stderr[-2000:]}"
+        )
     return output_path
 
 
@@ -3084,20 +3148,39 @@ async def _apply_music_and_watermark(
         watermark_plan = None
         if not music_plan:
             return source_path
+    if watermark_plan and watermark_plan.get("path") and not bool(watermark_plan.get("watermark_preprocessed")):
+        prepared_watermark = await _prepare_watermark_transparency_asset(
+            Path(str(watermark_plan["path"])),
+            output_path=output_path.with_name(f"{output_path.stem}.watermark.prepared.png"),
+            expected_width=expected_width,
+            watermark_plan=watermark_plan,
+            debug_dir=debug_dir,
+            cache_dir=(debug_dir / "packaging_subcache") if debug_dir is not None else None,
+        )
+        if prepared_watermark is not None:
+            watermark_plan = {
+                **dict(watermark_plan),
+                "path": str(prepared_watermark),
+                "watermark_preprocessed": True,
+            }
 
-    cmd = ["ffmpeg", "-y", "-i", str(source_path)]
-    filter_parts: list[str] = []
-    video_map = "0:v:0"
-    audio_map = "0:a:0"
-    next_input_index = 1
-
+    current_path = await _ensure_audio_duration_covers_video(
+        source_path,
+        output_path=output_path.with_name(f"{output_path.stem}.audio_padded{output_path.suffix}"),
+        debug_dir=debug_dir,
+        debug_prefix="packaging.source_audio_pad",
+    )
     if music_plan:
+        music_output_path = output_path if not watermark_plan else output_path.with_name(f"{output_path.stem}.music{output_path.suffix}")
+        cmd = [*_ffmpeg_base_cmd(), "-i", str(current_path)]
+        filter_parts: list[str] = []
         music_input_path = Path(music_plan["path"])
         if music_plan.get("loop_mode") == "loop_all":
             music_input_path = await _prepare_multi_track_music_loop(
                 candidate_paths=[Path(path) for path in music_plan.get("candidate_paths") or [music_plan["path"]]],
                 output_path=output_path.with_name("music.loop_all.m4a"),
                 debug_dir=debug_dir,
+                cache_dir=(debug_dir / "packaging_subcache") if debug_dir is not None else None,
             )
         if music_plan.get("loop_mode") in {"loop_single", "loop_all"}:
             cmd.extend(["-stream_loop", "-1"])
@@ -3112,34 +3195,59 @@ async def _apply_music_and_watermark(
         if enter_sec > 0:
             delay_ms = int(round(enter_sec * 1000))
             filter_parts.append(
-                f"[{next_input_index}:a]volume='{bgm_volume_expr}',highpass=f=120,lowpass=f=6000,adelay={delay_ms}|{delay_ms}"
+                f"[1:a]volume='{bgm_volume_expr}',highpass=f=120,lowpass=f=6000,adelay={delay_ms}|{delay_ms}"
                 f"{',afade=t=in:st=' + f'{enter_sec:.3f}' + ':d=' + f'{entry_fade_sec:.3f}' if entry_fade_sec > 0 else ''}[bgm_pre]"
             )
         else:
             filter_parts.append(
-                f"[{next_input_index}:a]volume='{bgm_volume_expr}',highpass=f=120,lowpass=f=6000"
+                f"[1:a]volume='{bgm_volume_expr}',highpass=f=120,lowpass=f=6000"
                 f"{',afade=t=in:st=0:d=' + f'{entry_fade_sec:.3f}' if entry_fade_sec > 0 else ''}[bgm_pre]"
             )
         filter_parts.append(
-            "[bgm_pre][0:a]sidechaincompress=threshold=0.02:ratio=10:attack=15:release=350:makeup=1[bgm]"
+            "[0:a][bgm_pre]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
+            "aformat=sample_rates=48000:channel_layouts=stereo,aresample=async=1:first_pts=0[aout]"
         )
-        filter_parts.append("[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=2[amixed]")
-        filter_parts.append(
-            _build_master_audio_filter_chain(
-                input_label="amixed",
-                voice_processing={"noise_reduction": False},
-                loudness={"target_lufs": _DEFAULT_TARGET_LUFS, "peak_limit": _DEFAULT_PEAK_LIMIT_DB, "lra": _DEFAULT_LRA},
-                output_label="aout",
-                allow_noise_reduction=False,
-                include_declipping=False,
-                include_async_resample=False,
-            )
-        )
-        audio_map = "[aout]"
-        next_input_index += 1
+        cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", "0:v:0", "-map", "[aout]"])
+        # Re-encode here instead of copying the bookends video stream. Copying that
+        # stream while filtering audio can make FFmpeg stop the mixed audio at a
+        # discontinuity even though the source audio is still decodable by seek.
+        cmd.extend(_video_delivery_encode_args(prefer_hardware=False, default_threads=2))
+        cmd.extend(_audio_encode_args(sample_rate=48000, channels=2))
+        cmd.extend(["-max_muxing_queue_size", "4096"])
+        if source_duration > 0:
+            cmd.extend(["-t", f"{source_duration:.6f}"])
+        cmd.append(str(music_output_path))
 
+        _write_debug_text(debug_dir, "packaging.music.ffmpeg.txt", _format_command(cmd))
+        result = await _run_process(
+            cmd,
+            timeout=_resolve_ffmpeg_timeout(
+                source_duration_sec=source_duration,
+                multiplier=1.4,
+                buffer_sec=360,
+                minimum_timeout=900,
+            ),
+        )
+        _write_process_debug(debug_dir, "packaging.music", result)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg music packaging failed: rc={result.returncode} stderr={result.stderr[-2000:]}")
+        current_path = music_output_path
+        current_path = await _ensure_audio_duration_covers_video(
+            current_path,
+            output_path=output_path.with_name(f"{output_path.stem}.music_audio_padded{output_path.suffix}"),
+            debug_dir=debug_dir,
+            debug_prefix="packaging.music_audio_pad",
+        )
+        try:
+            source_duration = _probe_duration(current_path)
+        except Exception:
+            pass
+
+    cmd = [*_ffmpeg_base_cmd(), "-i", str(current_path)]
+    filter_parts = []
+    video_map = "0:v:0"
     if watermark_plan and watermark_plan.get("path"):
-        cmd.extend(["-i", str(watermark_plan["path"])])
+        cmd.extend(["-loop", "1", "-i", str(watermark_plan["path"])])
         opacity = float(watermark_plan.get("opacity", 0.28) or 0.28)
         scale = float(watermark_plan.get("scale", 0.10) or 0.10)
         overlay_x, overlay_y, overlay_eval = _watermark_overlay_position(
@@ -3147,7 +3255,7 @@ async def _apply_music_and_watermark(
             dynamic=bool(watermark_plan.get("dynamic", True)),
         )
         watermark_width = max(1, int(round(expected_width * scale)))
-        watermark_filters = [f"[{next_input_index}:v]scale={watermark_width}:-1", "format=rgba"]
+        watermark_filters = [f"[1:v]scale={watermark_width}:-1", "format=rgba"]
         if not bool(watermark_plan.get("watermark_preprocessed")):
             # Uploaded logo assets are often flattened onto white backgrounds; key near-white tones out at render time.
             watermark_filters.extend(
@@ -3158,7 +3266,9 @@ async def _apply_music_and_watermark(
             )
         watermark_filters.append(f"colorchannelmixer=aa={opacity}[wmfinal]")
         filter_parts.append(",".join(watermark_filters))
-        filter_parts.append(f"[0:v][wmfinal]overlay=x='{overlay_x}':y='{overlay_y}':eval={overlay_eval}:format=auto[vout]")
+        filter_parts.append(
+            f"[0:v][wmfinal]overlay=x='{overlay_x}':y='{overlay_y}':eval={overlay_eval}:format=auto:shortest=1[vout]"
+        )
         video_map = "[vout]"
     elif watermark_plan and watermark_plan.get("text"):
         opacity = float(watermark_plan.get("opacity", 0.36) or 0.36)
@@ -3182,17 +3292,12 @@ async def _apply_music_and_watermark(
         video_map = "[vout]"
 
     if not filter_parts:
-        return source_path
+        return current_path
 
-    cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", video_map, "-map", audio_map])
-    if video_map == "0:v:0":
-        cmd.extend(["-c:v", "copy"])
-    else:
-        cmd.extend(_video_delivery_encode_args())
-    if audio_map == "0:a:0":
-        cmd.extend(["-c:a", "copy"])
-    else:
-        cmd.extend(_audio_encode_args())
+    cmd.extend(["-filter_complex", ";".join(filter_parts), "-map", video_map, "-map", "0:a:0"])
+    cmd.extend(_video_delivery_encode_args())
+    cmd.extend(_audio_encode_args(sample_rate=48000, channels=2))
+    cmd.extend(["-max_muxing_queue_size", "4096"])
     if source_duration > 0:
         cmd.extend(["-t", f"{source_duration:.6f}"])
     cmd.append(str(output_path))
@@ -3209,7 +3314,148 @@ async def _apply_music_and_watermark(
     )
     _write_process_debug(debug_dir, "packaging.music_watermark", result)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg music/watermark packaging failed: {result.stderr[-2000:]}")
+        if _resolve_video_encoder(prefer_hardware=True) != "libx264":
+            with suppress(OSError):
+                output_path.unlink(missing_ok=True)
+            fallback_cmd = _replace_video_encode_args_for_software(cmd)
+            _write_debug_text(debug_dir, "packaging.music_watermark.fallback.ffmpeg.txt", _format_command(fallback_cmd))
+            fallback_result = await _run_process(
+                fallback_cmd,
+                timeout=_resolve_ffmpeg_timeout(
+                    source_duration_sec=source_duration,
+                    multiplier=3.0,
+                    buffer_sec=600,
+                    minimum_timeout=1200,
+                ),
+            )
+            _write_process_debug(debug_dir, "packaging.music_watermark.fallback", fallback_result)
+            if fallback_result.returncode == 0:
+                return output_path
+            _write_debug_text(
+                debug_dir,
+                "packaging.watermark_skipped.json",
+                json.dumps(
+                    {
+                        "skipped": True,
+                        "reason": "watermark_overlay_failed_after_hardware_and_software_encodes",
+                        "fallback_returncode": fallback_result.returncode,
+                        "hardware_returncode": result.returncode,
+                        "source_path": str(current_path),
+                        "output_path": str(output_path),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+            logger.warning(
+                "Skipping non-critical watermark overlay after hardware and software failures source=%s output=%s hardware_rc=%s fallback_rc=%s",
+                current_path,
+                output_path,
+                result.returncode,
+                fallback_result.returncode,
+            )
+            return current_path
+        _write_debug_text(
+            debug_dir,
+            "packaging.watermark_skipped.json",
+            json.dumps(
+                {
+                    "skipped": True,
+                    "reason": "watermark_overlay_failed",
+                    "returncode": result.returncode,
+                    "source_path": str(current_path),
+                    "output_path": str(output_path),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+        logger.warning(
+            "Skipping non-critical watermark overlay after encode failure source=%s output=%s rc=%s",
+            current_path,
+            output_path,
+            result.returncode,
+        )
+        return current_path
+    return output_path
+
+
+def _probe_stream_duration(path: Path, codec_type: str) -> float:
+    streams = _ffprobe_json(path).get("streams", [])
+    durations: list[float] = []
+    for stream in streams:
+        if stream.get("codec_type") != codec_type:
+            continue
+        try:
+            durations.append(float(stream.get("duration", 0.0) or 0.0))
+        except (TypeError, ValueError):
+            continue
+    return max(durations, default=0.0)
+
+
+async def _ensure_audio_duration_covers_video(
+    source_path: Path,
+    *,
+    output_path: Path,
+    debug_dir: Path | None,
+    debug_prefix: str,
+) -> Path:
+    try:
+        media_info = _ffprobe_json(source_path)
+        video_duration = max(
+            _probe_duration(source_path),
+            _probe_stream_duration(source_path, "video"),
+        )
+        audio_duration = _probe_stream_duration(source_path, "audio")
+    except Exception:
+        return source_path
+    if video_duration <= 0.0:
+        return source_path
+    if audio_duration > 0.0 and audio_duration >= video_duration - 0.5:
+        return source_path
+
+    cmd = [*_ffmpeg_base_cmd(), "-i", str(source_path)]
+    has_audio = any(stream.get("codec_type") == "audio" for stream in media_info.get("streams", []))
+    if has_audio:
+        filter_complex = f"[0:a]apad=whole_dur={video_duration:.3f}[aout]"
+        cmd.extend(["-filter_complex", filter_complex, "-map", "0:v:0", "-map", "[aout]"])
+    else:
+        cmd.extend(
+            [
+                "-f",
+                "lavfi",
+                "-t",
+                f"{video_duration:.3f}",
+                "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=48000",
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+            ]
+        )
+    cmd.extend(["-c:v", "copy", *_audio_encode_args(sample_rate=48000, channels=2), "-t", f"{video_duration:.6f}"])
+    cmd.extend(["-max_muxing_queue_size", "4096", str(output_path)])
+    _write_debug_text(debug_dir, f"{debug_prefix}.ffmpeg.txt", _format_command(cmd))
+    result = await _run_process(
+        cmd,
+        timeout=_resolve_ffmpeg_timeout(
+            source_duration_sec=video_duration,
+            multiplier=0.6,
+            buffer_sec=120,
+            minimum_timeout=300,
+        ),
+    )
+    _write_process_debug(debug_dir, debug_prefix, result)
+    if result.returncode != 0 or not output_path.exists():
+        logger.warning(
+            "Audio duration padding failed source=%s video_duration=%.3f audio_duration=%.3f rc=%s",
+            source_path,
+            video_duration,
+            audio_duration,
+            result.returncode,
+        )
+        return source_path
     return output_path
 
 
@@ -3416,24 +3662,120 @@ def _build_music_volume_expression(
     return expr
 
 
+def _packaging_subcache_key(namespace: str, payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        {
+            "schema": "packaging_subcache_fingerprint.v1",
+            "namespace": namespace,
+            "payload": payload,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _file_fingerprint_payload(path: Path) -> dict[str, Any]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"path": str(path), "exists": False}
+    return {
+        "path": str(path),
+        "exists": True,
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+async def _restore_packaging_subcache(
+    *,
+    cache_dir: Path | None,
+    namespace: str,
+    fingerprint: dict[str, Any],
+    output_path: Path,
+    extension: str,
+) -> bool:
+    if cache_dir is None:
+        return False
+    key = _packaging_subcache_key(namespace, fingerprint)
+    cache_path = cache_dir / f"{namespace}.{key}{extension}"
+    metadata_path = cache_dir / f"{namespace}.{key}.json"
+    if not cache_path.exists() or not metadata_path.exists():
+        return False
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if metadata.get("fingerprint") != fingerprint:
+        return False
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(cache_path, output_path)
+    return output_path.exists()
+
+
+async def _store_packaging_subcache(
+    *,
+    cache_dir: Path | None,
+    namespace: str,
+    fingerprint: dict[str, Any],
+    output_path: Path,
+    extension: str,
+) -> None:
+    if cache_dir is None or not output_path.exists():
+        return
+    key = _packaging_subcache_key(namespace, fingerprint)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = cache_dir / f"{namespace}.{key}{extension}"
+    metadata_path = cache_dir / f"{namespace}.{key}.json"
+    shutil.copy2(output_path, cache_path)
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "schema": "packaging_subcache.v1",
+                "namespace": namespace,
+                "fingerprint": fingerprint,
+                "path": str(cache_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 async def _prepare_multi_track_music_loop(
     *,
     candidate_paths: list[Path],
     output_path: Path,
     debug_dir: Path | None,
+    cache_dir: Path | None = None,
 ) -> Path:
     unique_paths: list[Path] = []
     seen: set[str] = set()
     for path in candidate_paths:
-        key = str(path)
-        if key in seen or not path.exists():
+        resolved_path = resolve_runtime_media_path(path)
+        key = str(resolved_path)
+        if key in seen or not resolved_path.exists():
             continue
         seen.add(key)
-        unique_paths.append(path)
+        unique_paths.append(resolved_path)
     if not unique_paths:
         raise FileNotFoundError("No usable music tracks for loop_all mode")
     if len(unique_paths) == 1:
         return unique_paths[0]
+    fingerprint = {
+        "tracks": [_file_fingerprint_payload(path) for path in unique_paths],
+    }
+    if await _restore_packaging_subcache(
+        cache_dir=cache_dir,
+        namespace="music_loop",
+        fingerprint=fingerprint,
+        output_path=output_path,
+        extension=output_path.suffix or ".m4a",
+    ):
+        return output_path
 
     cmd = _ffmpeg_base_cmd()
     for path in unique_paths:
@@ -3462,6 +3804,13 @@ async def _prepare_multi_track_music_loop(
     _write_process_debug(debug_dir, "packaging.music_loop_all", result)
     if result.returncode != 0 or not output_path.exists():
         raise RuntimeError(f"ffmpeg multi-track music loop failed: {result.stderr[-2000:]}")
+    await _store_packaging_subcache(
+        cache_dir=cache_dir,
+        namespace="music_loop",
+        fingerprint=fingerprint,
+        output_path=output_path,
+        extension=output_path.suffix or ".m4a",
+    )
     return output_path
 
 
@@ -3473,7 +3822,24 @@ async def _prepare_packaging_clip(
     expected_height: int,
     target_fps: float = 0.0,
     trim_duration_sec: float | None = None,
+    cache_dir: Path | None = None,
 ) -> Path:
+    source_path = resolve_runtime_media_path(source_path)
+    fingerprint = {
+        "source": _file_fingerprint_payload(source_path),
+        "expected_width": int(expected_width),
+        "expected_height": int(expected_height),
+        "target_fps": round(float(target_fps or 0.0), 6),
+        "trim_duration_sec": round(float(trim_duration_sec or 0.0), 3) if trim_duration_sec is not None else None,
+    }
+    if await _restore_packaging_subcache(
+        cache_dir=cache_dir,
+        namespace="prepared_clip",
+        fingerprint=fingerprint,
+        output_path=output_path,
+        extension=output_path.suffix or ".mp4",
+    ):
+        return output_path
     media_info = _ffprobe_json(source_path)
     has_audio = any(stream.get("codec_type") == "audio" for stream in media_info.get("streams", []))
     source_info = _probe_video_stream(source_path)
@@ -3518,6 +3884,77 @@ async def _prepare_packaging_clip(
     result = await _run_process(cmd, timeout=get_settings().ffmpeg_timeout_sec)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg packaging clip prepare failed: {result.stderr[-2000:]}")
+    await _store_packaging_subcache(
+        cache_dir=cache_dir,
+        namespace="prepared_clip",
+        fingerprint=fingerprint,
+        output_path=output_path,
+        extension=output_path.suffix or ".mp4",
+    )
+    return output_path
+
+
+async def _prepare_watermark_transparency_asset(
+    source_path: Path,
+    *,
+    output_path: Path,
+    expected_width: int,
+    watermark_plan: dict[str, Any],
+    debug_dir: Path | None,
+    cache_dir: Path | None = None,
+) -> Path | None:
+    if not source_path.exists():
+        return None
+    scale = float(watermark_plan.get("scale", 0.10) or 0.10)
+    watermark_width = max(1, int(round(max(1, int(expected_width or 1)) * scale)))
+    fingerprint = {
+        "source": _file_fingerprint_payload(source_path),
+        "watermark_width": watermark_width,
+        "white_key_filters": [
+            {"color": "0xFFFFFF", "similarity": 0.10, "blend": 0.02},
+            {"color": "0xF8F8F8", "similarity": 0.10, "blend": 0.02},
+        ],
+    }
+    if await _restore_packaging_subcache(
+        cache_dir=cache_dir,
+        namespace="watermark_rgba",
+        fingerprint=fingerprint,
+        output_path=output_path,
+        extension=".png",
+    ):
+        return output_path
+
+    cmd = [
+        *_ffmpeg_base_cmd(),
+        "-loop",
+        "1",
+        "-i",
+        str(source_path),
+        "-frames:v",
+        "1",
+        "-vf",
+        (
+            f"scale={watermark_width}:-1,format=rgba,"
+            "colorkey=0xFFFFFF:0.10:0.02,"
+            "colorkey=0xF8F8F8:0.10:0.02"
+        ),
+        str(output_path),
+    ]
+    _write_debug_text(debug_dir, "packaging.watermark_prepare.ffmpeg.txt", _format_command(cmd))
+    result = await _run_process(
+        cmd,
+        timeout=max(30, min(int(getattr(get_settings(), "ffmpeg_timeout_sec", 600) or 600), 120)),
+    )
+    _write_process_debug(debug_dir, "packaging.watermark_prepare", result)
+    if result.returncode != 0 or not output_path.exists():
+        return None
+    await _store_packaging_subcache(
+        cache_dir=cache_dir,
+        namespace="watermark_rgba",
+        fingerprint=fingerprint,
+        output_path=output_path,
+        extension=".png",
+    )
     return output_path
 
 
@@ -3612,9 +4049,9 @@ def _default_dynamic_text_watermark_plan(render_plan: dict[str, Any] | None) -> 
     text = (
         str(creative_profile.get("watermark_text") or "").strip()
         or str(content_profile.get("creator_name") or "").strip()
+        or str(content_profile.get("creator_profile_name") or "").strip()
+        or "RoughCut"
     )
-    if not text:
-        return None
     return {
         "text": text[:24],
         "opacity": 0.5,
@@ -3741,6 +4178,7 @@ async def _run_process(cmd: list[str], *, timeout: int) -> subprocess.CompletedP
     try:
         process = await asyncio.create_subprocess_exec(
             *safe_cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

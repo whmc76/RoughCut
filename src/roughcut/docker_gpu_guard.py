@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +25,9 @@ logger = logging.getLogger(__name__)
 
 _TARGET_LOCK = threading.RLock()
 _IDLE_TIMERS: dict[str, threading.Timer] = {}
-_LOCAL_LEASE_COUNTS: dict[str, int] = {}
+_LOCAL_LEASE_TOKENS: dict[str, set[str]] = {}
+_LEASE_OWNER_ID = f"pid-{os.getpid()}-{uuid.uuid4().hex}"
+_LEASE_TOKEN_TTL_SEC = 6 * 60 * 60
 
 
 @dataclass(frozen=True)
@@ -94,26 +97,24 @@ class _ManagedGPUServiceLease:
     def __init__(self, required_urls: tuple[str, ...], *, reason: str = "") -> None:
         self.required_urls = required_urls
         self.reason = reason
-        self._targets: list[_ManagedDockerTarget] = []
+        self._leases: list[tuple[_ManagedDockerTarget, str]] = []
 
     def __enter__(self):
         targets = _resolve_required_targets(self.required_urls)
-        acquired: list[_ManagedDockerTarget] = []
         try:
             for target in targets:
-                _acquire_target_lease(target=target, reason=self.reason)
-                acquired.append(target)
+                token = _acquire_target_lease(target=target, reason=self.reason)
+                self._leases.append((target, token))
         except Exception:
-            for target in reversed(acquired):
-                _release_target_lease(target=target, reason=f"{self.reason}:rollback")
+            for target, token in reversed(self._leases):
+                _release_target_lease(target=target, token=token, reason=f"{self.reason}:rollback")
             raise
-        self._targets = acquired
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        for target in reversed(self._targets):
-            _release_target_lease(target=target, reason=self.reason)
-        self._targets = []
+        for target, token in reversed(self._leases):
+            _release_target_lease(target=target, token=token, reason=self.reason)
+        self._leases = []
         return False
 
 
@@ -192,21 +193,22 @@ def _target_matches(target: _ManagedDockerTarget, normalized_required: set[str])
     return bool(target_urls & normalized_required)
 
 
-def _acquire_target_lease(*, target: _ManagedDockerTarget, reason: str) -> None:
+def _acquire_target_lease(*, target: _ManagedDockerTarget, reason: str) -> str:
     with _TARGET_LOCK:
         _cancel_idle_timer_locked(target.key)
-        _increment_lease_count(target.key)
+        token = _register_lease_token(target.key)
     try:
         _ensure_target_started(target=target, reason=reason)
     except Exception:
         with _TARGET_LOCK:
-            _decrement_lease_count(target.key)
+            _release_lease_token(target.key, token)
         raise
+    return token
 
 
-def _release_target_lease(*, target: _ManagedDockerTarget, reason: str) -> None:
+def _release_target_lease(*, target: _ManagedDockerTarget, token: str, reason: str) -> None:
     with _TARGET_LOCK:
-        remaining = _decrement_lease_count(target.key)
+        remaining = _release_lease_token(target.key, token)
         _write_float_key(target.key, "last_release_at", time.time())
         if remaining <= 0:
             _schedule_idle_stop_locked(target=target, reason=reason)
@@ -565,38 +567,81 @@ def _lease_key(target_key: str) -> str:
     return f"roughcut:docker_gpu_guard:{target_key}:lease_count"
 
 
+def _lease_tokens_key(target_key: str) -> str:
+    return f"roughcut:docker_gpu_guard:{target_key}:lease_tokens"
+
+
 def _meta_key(target_key: str, name: str) -> str:
     return f"roughcut:docker_gpu_guard:{target_key}:{name}"
 
 
-def _increment_lease_count(target_key: str) -> int:
-    client = _get_redis_client()
-    if client is None:
-        _LOCAL_LEASE_COUNTS[target_key] = _LOCAL_LEASE_COUNTS.get(target_key, 0) + 1
-        return _LOCAL_LEASE_COUNTS[target_key]
-    return int(client.incr(_lease_key(target_key)))
+def _new_lease_token(target_key: str) -> str:
+    return f"{_LEASE_OWNER_ID}:{target_key}:{time.time_ns()}:{uuid.uuid4().hex}"
 
 
-def _decrement_lease_count(target_key: str) -> int:
+def _register_lease_token(target_key: str) -> str:
+    token = _new_lease_token(target_key)
     client = _get_redis_client()
     if client is None:
-        _LOCAL_LEASE_COUNTS[target_key] = max(0, _LOCAL_LEASE_COUNTS.get(target_key, 0) - 1)
-        return _LOCAL_LEASE_COUNTS[target_key]
-    remaining = int(client.decr(_lease_key(target_key)))
-    if remaining >= 0:
+        _LOCAL_LEASE_TOKENS.setdefault(target_key, set()).add(token)
+        return token
+    now = time.time()
+    tokens_key = _lease_tokens_key(target_key)
+    try:
+        pipe = client.pipeline()
+        pipe.zremrangebyscore(tokens_key, "-inf", now)
+        pipe.zadd(tokens_key, {token: now + _LEASE_TOKEN_TTL_SEC})
+        pipe.expire(tokens_key, _LEASE_TOKEN_TTL_SEC)
+        pipe.execute()
+        _write_lease_count_compat(target_key, int(client.zcard(tokens_key)))
+    except Exception:
+        logger.warning("unable to register managed gpu lease token target=%s", target_key, exc_info=True)
+    return token
+
+
+def _release_lease_token(target_key: str, token: str) -> int:
+    client = _get_redis_client()
+    if client is None:
+        tokens = _LOCAL_LEASE_TOKENS.setdefault(target_key, set())
+        tokens.discard(token)
+        return len(tokens)
+    tokens_key = _lease_tokens_key(target_key)
+    try:
+        now = time.time()
+        pipe = client.pipeline()
+        pipe.zrem(tokens_key, token)
+        pipe.zremrangebyscore(tokens_key, "-inf", now)
+        pipe.execute()
+        remaining = int(client.zcard(tokens_key))
+        _write_lease_count_compat(target_key, remaining)
         return remaining
-    client.set(_lease_key(target_key), 0)
-    return 0
+    except Exception:
+        logger.warning("unable to release managed gpu lease token target=%s", target_key, exc_info=True)
+        return _current_lease_count(target_key)
 
 
 def _current_lease_count(target_key: str) -> int:
     client = _get_redis_client()
     if client is None:
-        return max(0, _LOCAL_LEASE_COUNTS.get(target_key, 0))
+        return len(_LOCAL_LEASE_TOKENS.get(target_key, set()))
     try:
-        return max(0, int(client.get(_lease_key(target_key)) or 0))
+        tokens_key = _lease_tokens_key(target_key)
+        client.zremrangebyscore(tokens_key, "-inf", time.time())
+        count = max(0, int(client.zcard(tokens_key)))
+        _write_lease_count_compat(target_key, count)
+        return count
     except Exception:
         return 0
+
+
+def _write_lease_count_compat(target_key: str, count: int) -> None:
+    client = _get_redis_client()
+    if client is None:
+        return
+    try:
+        client.set(_lease_key(target_key), max(0, int(count)), ex=_LEASE_TOKEN_TTL_SEC)
+    except Exception:
+        logger.debug("unable to write managed gpu lease count compatibility key target=%s", target_key, exc_info=True)
 
 
 def _write_float_key(target_key: str, name: str, value: float) -> None:

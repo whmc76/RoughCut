@@ -11,6 +11,7 @@ def manual_editor_change_contract(change_plan: dict[str, Any] | None) -> dict[st
         "timeline_changed": bool(plan.get("timeline_changed")),
         "subtitle_changed": bool(plan.get("subtitle_changed")),
         "video_transform_changed": bool(plan.get("video_transform_changed")),
+        "packaging_changed": bool(plan.get("packaging_changed")),
         "rotation_changed": bool(plan.get("rotation_changed")),
     }
 
@@ -29,6 +30,7 @@ def manual_editor_change_contract_is_consistent(change_contract: dict[str, Any] 
     timeline_changed = bool(contract["timeline_changed"])
     subtitle_changed = bool(contract["subtitle_changed"])
     video_transform_changed = bool(contract["video_transform_changed"])
+    packaging_changed = bool(contract["packaging_changed"])
     render_strategy = contract["render_strategy"]
 
     if change_scope == "timeline":
@@ -46,11 +48,20 @@ def manual_editor_change_contract_is_consistent(change_contract: dict[str, Any] 
             and not video_transform_changed
             and render_strategy == "reuse_timeline_effect_plan"
         )
+    if change_scope == "packaging":
+        return (
+            not timeline_changed
+            and not subtitle_changed
+            and not video_transform_changed
+            and packaging_changed
+            and render_strategy == "packaging_only_render"
+        )
     if change_scope == "no_material_change":
         return (
             not timeline_changed
             and not subtitle_changed
             and not video_transform_changed
+            and not packaging_changed
             and render_strategy == "metadata_refresh_render"
         )
     return False
@@ -64,6 +75,8 @@ def manual_editor_rerun_issue_code(change_contract: dict[str, Any] | None) -> st
         return "manual_video_transform_edit"
     if contract["subtitle_changed"]:
         return "manual_subtitle_edit"
+    if contract["packaging_changed"]:
+        return "manual_packaging_edit"
     return "manual_editor_no_material_change"
 
 
@@ -87,4 +100,6 @@ def manual_editor_apply_detail(change_scope: str) -> str:
         return "未检测到时间线/字幕/画面方向变化，已保存编辑元数据，无需触发剪辑重跑。"
     if str(change_scope or "") == "video_transform":
         return "画面方向已保存，已从 render 开始重新生成成片。"
+    if str(change_scope or "") == "packaging":
+        return "外挂包装设置已保存，已从 render 开始重新生成成片。"
     return "手动时间线已保存，已从 render 开始重新生成成片。"

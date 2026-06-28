@@ -287,7 +287,7 @@ def render_batch_report_markdown(payload: dict[str, Any]) -> str:
 
 
 def render_methodology_report_markdown() -> str:
-    return """# 文案引用原片型影视二创方法论与流程
+    return """# 文案引用原片型解说二创方法论与流程
 
 ## 定义
 

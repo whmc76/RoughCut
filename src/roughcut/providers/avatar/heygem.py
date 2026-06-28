@@ -5,6 +5,8 @@ import subprocess
 import time
 import uuid
 import os
+import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +15,14 @@ import httpx
 from roughcut.config import DEFAULT_HEYGEM_SHARED_ROOT, get_settings, resolve_heygem_shared_root
 from roughcut.docker_gpu_guard import hold_managed_gpu_services
 from roughcut.providers.avatar.base import AvatarProvider
+from roughcut.runtime_paths import resolve_runtime_media_path
 
 _DEFAULT_SHARED_ROOTS = (
     DEFAULT_HEYGEM_SHARED_ROOT,
 )
 _CONTAINER_VIDEO_ROOT = Path("/code/data/inputs/video")
+_CONTAINER_AUDIO_ROOT = Path("/code/data/inputs/audio")
+_CONTAINER_RESULT_ROOT = Path("/code/data/result")
 _POLL_INTERVAL_SECONDS = 2.0
 _TASK_TIMEOUT_MIN_SECONDS = 600.0
 _TASK_TIMEOUT_MAX_SECONDS = 3600.0
@@ -32,9 +37,11 @@ _SHARED_AUDIO_SETTLE_FLOOR_SECONDS = 0.5
 _SHARED_AUDIO_SETTLE_MAX_SECONDS = 8.0
 _SHARED_AUDIO_SETTLE_BYTES_PER_SECOND = 8 * 1024 * 1024
 _SEGMENT_BUSY_RETRY_DELAYS_SECONDS = (2.0, 4.0, 6.0, 8.0, 10.0)
-_SEGMENT_BUSY_MAX_WAIT_SECONDS = 90.0
+_SEGMENT_BUSY_MAX_WAIT_SECONDS = 300.0
 _RESULT_READY_RETRIES = 30
 _RESULT_READY_RETRY_SECONDS = 2.0
+
+logger = logging.getLogger(__name__)
 
 
 class HeyGemAvatarProvider(AvatarProvider):
@@ -119,13 +126,28 @@ class HeyGemAvatarProvider(AvatarProvider):
             with httpx.Client(timeout=timeout, follow_redirects=True) as client:
                 results = []
                 for segment in segments:
+                    segment_presenter_source = presenter_source
+                    segment_presenter_id = str(segment.get("presenter_id") or "").strip()
+                    if segment_presenter_id:
+                        resolved_segment_presenter = _resolve_presenter_source(segment_presenter_id, job_id=job_id)
+                        if not resolved_segment_presenter:
+                            results.append(
+                                {
+                                    "segment_id": segment.get("segment_id"),
+                                    "status": "failed",
+                                    "error": "presenter_source_not_found",
+                                    "presenter_id": segment_presenter_id,
+                                }
+                            )
+                            continue
+                        segment_presenter_source = resolved_segment_presenter
                     try:
                         results.append(
                             self._execute_segment(
                                 client=client,
                                 headers=headers,
                                 request=request,
-                                presenter_source=presenter_source,
+                                presenter_source=segment_presenter_source,
                                 segment=segment,
                             )
                         )
@@ -195,6 +217,8 @@ class HeyGemAvatarProvider(AvatarProvider):
             "chaofen": 0,
             "pn": 1,
         }
+        _ensure_heygem_container_path_visible(audio_source, media_kind="audio")
+        _ensure_heygem_container_path_visible(presenter_source, media_kind="video")
         submit_endpoints = _build_heygem_endpoints(str(request["submit_endpoint"]))
         if not submit_endpoints:
             raise RuntimeError(
@@ -205,6 +229,7 @@ class HeyGemAvatarProvider(AvatarProvider):
             task_started = False
             busy_waited_seconds = 0.0
             busy_attempt = 0
+            busy_max_wait_seconds = _resolve_segment_busy_max_wait_seconds()
             try:
                 while True:
                     response = client.post(endpoints["submit"], headers=headers, json=payload)
@@ -218,7 +243,7 @@ class HeyGemAvatarProvider(AvatarProvider):
                         delay = _SEGMENT_BUSY_RETRY_DELAYS_SECONDS[
                             min(busy_attempt, len(_SEGMENT_BUSY_RETRY_DELAYS_SECONDS) - 1)
                         ]
-                        if busy_waited_seconds + delay > _SEGMENT_BUSY_MAX_WAIT_SECONDS:
+                        if busy_waited_seconds + delay > busy_max_wait_seconds:
                             return {
                                 "segment_id": segment.get("segment_id"),
                                 "status": "failed",
@@ -228,6 +253,16 @@ class HeyGemAvatarProvider(AvatarProvider):
                             }
                         busy_attempt += 1
                         busy_waited_seconds += delay
+                        logger.warning(
+                            "HeyGem segment submit busy segment_id=%s task_code=%s waited=%.1fs/%.1fs delay=%.1fs code=%s msg=%s",
+                            segment.get("segment_id"),
+                            task_code,
+                            busy_waited_seconds,
+                            busy_max_wait_seconds,
+                            delay,
+                            submit_code,
+                            submit_message,
+                        )
                         time.sleep(delay)
                         continue
                     return {
@@ -248,8 +283,16 @@ class HeyGemAvatarProvider(AvatarProvider):
                 )
                 data = query_payload.get("data") or {}
                 result_value = str(data.get("result") or "").strip()
-                local_result_path = _resolve_local_result_path(result_value)
                 is_completed = int(data.get("status") or 0) == 2 or _is_completed_task_payload(data)
+                local_result_path = (
+                    _resolve_or_collect_result_path(
+                        result_value,
+                        task_code=task_code,
+                        min_duration_sec=_segment_expected_duration_seconds(segment),
+                    )
+                    if is_completed
+                    else None
+                )
                 ready_local_result_path = (
                     _wait_for_result_file_ready(local_result_path) if is_completed and local_result_path else None
                 )
@@ -390,6 +433,15 @@ def _is_heygem_busy_message(message: object) -> bool:
     return any(token in normalized for token in busy_tokens)
 
 
+def _resolve_segment_busy_max_wait_seconds() -> float:
+    raw_value = os.getenv("ROUGHCUT_HEYGEM_SEGMENT_BUSY_MAX_WAIT_SECONDS", str(_SEGMENT_BUSY_MAX_WAIT_SECONDS)).strip()
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return float(_SEGMENT_BUSY_MAX_WAIT_SECONDS)
+    return max(30.0, min(900.0, value))
+
+
 def _build_heygem_endpoints(submit_like_url: str) -> list[dict[str, str]]:
     raw = str(submit_like_url or "").strip().rstrip("/")
     base = raw
@@ -485,7 +537,7 @@ def _resolve_presenter_source(presenter_id: str, *, job_id: str | None = None) -
     shared_video_dir = shared_root / "inputs" / "video"
     shared_video_dir.mkdir(parents=True, exist_ok=True)
 
-    local_path = Path(presenter_id)
+    local_path = resolve_runtime_media_path(presenter_id)
     if local_path.exists():
         if job_id:
             target_path = _prepare_presenter_video(
@@ -579,10 +631,106 @@ def _resolve_local_result_path(result_value: str) -> str | None:
     return None
 
 
+def _resolve_or_collect_result_path(
+    result_value: str,
+    *,
+    task_code: str | None = None,
+    min_duration_sec: float | None = None,
+) -> str | None:
+    local_result = _resolve_local_result_path(result_value)
+    if local_result and _local_video_duration_satisfies(local_result, min_duration_sec=min_duration_sec):
+        return local_result
+    for attempt in range(_RESULT_READY_RETRIES):
+        for container_path in _candidate_heygem_result_container_paths(result_value, task_code=task_code):
+            collected = _collect_heygem_container_result(
+                container_path,
+                task_code=task_code,
+                min_duration_sec=min_duration_sec,
+            )
+            if collected:
+                return collected
+        if attempt + 1 < _RESULT_READY_RETRIES:
+            time.sleep(_RESULT_READY_RETRY_SECONDS)
+    return None
+
+
+def _candidate_heygem_result_container_paths(result_value: str, *, task_code: str | None = None) -> list[str]:
+    candidates: list[str] = []
+
+    def add(value: str) -> None:
+        normalized = value.strip().replace("\\", "/")
+        if not normalized:
+            return
+        if not normalized.startswith("/"):
+            normalized = f"/{normalized}"
+        if not normalized.startswith("/code/data/"):
+            normalized = f"/code/data{normalized}"
+        if normalized not in candidates:
+            candidates.append(normalized)
+
+    safe_task_code = str(task_code or "").strip()
+    if safe_task_code:
+        add(f"/{safe_task_code}-r.mp4")
+        add(f"/result/{safe_task_code}-r.mp4")
+        add(f"/temp/{safe_task_code}/result.avi")
+        add(f"/temp/{safe_task_code}/result.mp4")
+
+    normalized_result = str(result_value or "").strip().replace("\\", "/")
+    if normalized_result:
+        add(normalized_result)
+        if not normalized_result.startswith("/"):
+            add(f"/temp/{normalized_result}")
+            add(f"/result/{normalized_result}")
+        elif not normalized_result.startswith("/code/data/"):
+            add(f"/temp/{normalized_result.lstrip('/')}")
+            add(f"/result/{normalized_result.lstrip('/')}")
+    return candidates
+
+
+def _collect_heygem_container_result(
+    container_path: str,
+    *,
+    task_code: str | None = None,
+    min_duration_sec: float | None = None,
+) -> str | None:
+    value = str(container_path or "").strip()
+    if not value.startswith("/code/data/"):
+        return None
+    container_name = _resolve_running_heygem_container_name()
+    if not container_name:
+        return None
+    if not _heygem_container_file_ready(container_name=container_name, container_path=value, media_kind="video"):
+        return None
+    if not _container_video_duration_satisfies(
+        container_name=container_name,
+        container_path=value,
+        min_duration_sec=min_duration_sec,
+    ):
+        return None
+    shared_root = _detect_shared_root()
+    if shared_root is None:
+        return None
+    safe_task_code = _sanitize_stage_name(task_code or Path(value).parent.name or "heygem_result")
+    suffix = Path(value).suffix or ".mp4"
+    target_dir = shared_root / "result" / "roughcut_collected"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / f"{safe_task_code}_{Path(value).stem or 'result'}{suffix}"
+    copy_result = _run_docker_command(
+        ["docker", "cp", f"{container_name}:{value}", str(target_path)],
+        timeout=300.0,
+    )
+    if copy_result is None or copy_result.returncode != 0:
+        return None
+    ready_path = _wait_for_result_file_ready(str(target_path))
+    if not ready_path or not _local_video_duration_satisfies(ready_path, min_duration_sec=min_duration_sec):
+        return None
+    return ready_path
+
+
 def _resolve_completed_task_result(task_code: str) -> str | None:
     if not task_code:
         return None
-    return _resolve_local_result_path(f"/{task_code}-r.mp4")
+    return _resolve_or_collect_result_path("", task_code=task_code)
 
 
 def _resolve_audio_source(
@@ -599,7 +747,7 @@ def _resolve_audio_source(
         return audio_value
 
     shared_root = _detect_shared_root()
-    local_path = Path(audio_value)
+    local_path = resolve_runtime_media_path(audio_value)
     if shared_root is None:
         return str(local_path) if local_path.exists() else None
     if not local_path.exists():
@@ -611,7 +759,7 @@ def _resolve_audio_source(
     target_name = local_path.name if not prefix_parts else f"{'_'.join(prefix_parts)}_{local_path.name}"
     target_path = shared_audio_dir / target_name
     _stage_audio_file(local_path=local_path, target_path=target_path)
-    return str((Path("/code/data/inputs/audio") / target_path.name).as_posix())
+    return str((_CONTAINER_AUDIO_ROOT / target_path.name).as_posix())
 
 
 def _stage_audio_file(*, local_path: Path, target_path: Path) -> None:
@@ -735,6 +883,139 @@ def _wait_for_result_file_ready(path_value: str | None) -> str | None:
     return None
 
 
+def _segment_expected_duration_seconds(segment: dict[str, Any]) -> float | None:
+    try:
+        value = float(segment.get("duration_sec") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _container_video_duration_satisfies(
+    *,
+    container_name: str,
+    container_path: str,
+    min_duration_sec: float | None,
+) -> bool:
+    if min_duration_sec is None or min_duration_sec <= 0:
+        return True
+    duration = _probe_heygem_container_video_duration_seconds(
+        container_name=container_name,
+        container_path=container_path,
+    )
+    return duration is not None and duration + 1.0 >= min_duration_sec
+
+
+def _local_video_duration_satisfies(path_value: str, *, min_duration_sec: float | None) -> bool:
+    if min_duration_sec is None or min_duration_sec <= 0:
+        return True
+    duration = _probe_local_video_duration_seconds(path_value)
+    return duration is not None and duration + 1.0 >= min_duration_sec
+
+
+def _probe_heygem_container_video_duration_seconds(*, container_name: str, container_path: str) -> float | None:
+    result = _run_docker_command(
+        [
+            "docker",
+            "exec",
+            container_name,
+            "ffprobe",
+            "-v",
+            "error",
+            "-count_frames",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=duration,nb_read_frames,avg_frame_rate,r_frame_rate",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            container_path,
+        ],
+        timeout=45.0,
+    )
+    if result is None or result.returncode != 0:
+        return None
+    return _duration_from_ffprobe_json(str(result.stdout or ""))
+
+
+def _probe_local_video_duration_seconds(path_value: str) -> float | None:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-count_frames",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=duration,nb_read_frames,avg_frame_rate,r_frame_rate",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "json",
+                str(path_value),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=45.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return _duration_from_ffprobe_json(str(result.stdout or ""))
+
+
+def _duration_from_ffprobe_json(payload_value: str) -> float | None:
+    try:
+        payload = json.loads(payload_value)
+    except (TypeError, ValueError):
+        return None
+    format_duration = _positive_float(((payload.get("format") or {}) if isinstance(payload, dict) else {}).get("duration"))
+    if format_duration is not None:
+        return format_duration
+    streams = payload.get("streams") if isinstance(payload, dict) else None
+    if not isinstance(streams, list) or not streams:
+        return None
+    stream = streams[0] if isinstance(streams[0], dict) else {}
+    stream_duration = _positive_float(stream.get("duration"))
+    if stream_duration is not None:
+        return stream_duration
+    frame_count = _positive_float(stream.get("nb_read_frames"))
+    frame_rate = _parse_frame_rate(str(stream.get("avg_frame_rate") or stream.get("r_frame_rate") or ""))
+    if frame_count is None or frame_rate is None or frame_rate <= 0:
+        return None
+    return frame_count / frame_rate
+
+
+def _positive_float(value: object) -> float | None:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _parse_frame_rate(value: str) -> float | None:
+    raw = str(value or "").strip()
+    if not raw or raw == "0/0":
+        return None
+    if "/" in raw:
+        numerator, denominator = raw.split("/", 1)
+        numerator_value = _positive_float(numerator)
+        denominator_value = _positive_float(denominator)
+        if numerator_value is None or denominator_value is None:
+            return None
+        return numerator_value / denominator_value
+    return _positive_float(raw)
+
+
 def _settle_shared_audio_mount(path: Path) -> None:
     try:
         size_bytes = max(0, int(path.stat().st_size))
@@ -768,6 +1049,116 @@ def _detect_shared_root() -> Path | None:
         if root.exists():
             return root
     return None
+
+
+def _candidate_heygem_container_names() -> list[str]:
+    candidates: list[str] = []
+    try:
+        service_names = str(getattr(get_settings(), "heygem_docker_services", "") or "")
+    except Exception:
+        service_names = ""
+    for value in service_names.replace(",", " ").split():
+        normalized = value.strip()
+        if normalized and normalized not in candidates:
+            candidates.append(normalized)
+    for fallback in ("heygem", "roughcut-heygem-1"):
+        if fallback not in candidates:
+            candidates.append(fallback)
+    return candidates
+
+
+def _resolve_running_heygem_container_name() -> str | None:
+    for name in _candidate_heygem_container_names():
+        result = _run_docker_command(
+            ["docker", "inspect", "--format", "{{.State.Running}}", name],
+            timeout=5.0,
+        )
+        if result is not None and result.returncode == 0 and str(result.stdout or "").strip().lower() == "true":
+            return name
+    return None
+
+
+def _ensure_heygem_container_path_visible(container_path: str, *, media_kind: str) -> None:
+    value = str(container_path or "").strip()
+    if not value.startswith("/code/data/"):
+        return
+    container_name = _resolve_running_heygem_container_name()
+    if not container_name:
+        return
+    if _heygem_container_file_ready(container_name=container_name, container_path=value, media_kind=media_kind):
+        return
+
+    local_path_value = _resolve_container_local_path(value)
+    if not local_path_value:
+        raise RuntimeError(f"heygem_shared_file_not_staged:{value}")
+    local_path = Path(local_path_value)
+    if not local_path.exists():
+        raise RuntimeError(f"heygem_shared_file_not_staged:{local_path}")
+
+    parent_path = str(Path(value).parent.as_posix())
+    mkdir_result = _run_docker_command(
+        ["docker", "exec", container_name, "mkdir", "-p", parent_path],
+        timeout=10.0,
+    )
+    if mkdir_result is None or mkdir_result.returncode != 0:
+        detail = str(getattr(mkdir_result, "stderr", "") or "").strip() if mkdir_result is not None else "docker unavailable"
+        raise RuntimeError(f"heygem_shared_mount_prepare_failed:{value}:{detail[-500:]}")
+
+    copy_result = _run_docker_command(
+        ["docker", "cp", str(local_path), f"{container_name}:{value}"],
+        timeout=120.0,
+    )
+    if copy_result is None or copy_result.returncode != 0:
+        detail = str(getattr(copy_result, "stderr", "") or "").strip() if copy_result is not None else "docker unavailable"
+        raise RuntimeError(f"heygem_shared_mount_sync_failed:{value}:{detail[-500:]}")
+    if not _heygem_container_file_ready(container_name=container_name, container_path=value, media_kind=media_kind):
+        raise RuntimeError(f"heygem_shared_mount_sync_unreadable:{value}")
+
+
+def _heygem_container_file_ready(*, container_name: str, container_path: str, media_kind: str) -> bool:
+    if media_kind == "audio":
+        result = _run_docker_command(
+            [
+                "docker",
+                "exec",
+                container_name,
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                container_path,
+            ],
+            timeout=15.0,
+        )
+        if result is None or result.returncode != 0:
+            return False
+        try:
+            return float(str(result.stdout or "").strip()) > 0
+        except (TypeError, ValueError):
+            return False
+    result = _run_docker_command(
+        ["docker", "exec", container_name, "test", "-s", container_path],
+        timeout=10.0,
+    )
+    return result is not None and result.returncode == 0
+
+
+def _run_docker_command(command: list[str], *, timeout: float) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
 
 
 def _resolve_docker_configured_shared_root() -> Path | None:
@@ -809,8 +1200,8 @@ def _resolve_container_local_path(container_path: str) -> str | None:
     shared_root = _detect_shared_root()
     if shared_root is None:
         return None
-    relative = value.removeprefix("/code/data/").replace("/", "\\")
-    return str((shared_root / relative).resolve())
+    relative = value.removeprefix("/code/data/").lstrip("/").replace("\\", "/")
+    return str((shared_root / Path(relative)).resolve())
 
 
 def _normalize_job_path_prefix(job_id: str | None) -> str:

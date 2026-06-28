@@ -51,6 +51,7 @@ def creator_asset_path_candidates(stored_path: Any) -> list[Path]:
         if suffix:
             candidates.append(Path(get_settings().output_dir).expanduser().resolve() / "_creator_assets" / Path(suffix))
             candidates.append(DEFAULT_OUTPUT_ROOT / "_creator_assets" / Path(suffix))
+            candidates.append((DEFAULT_PROJECT_ROOT / "data" / "output") / "_creator_assets" / Path(suffix))
             candidates.append((DEFAULT_PROJECT_ROOT / "data" / "runtime" / "output") / "_creator_assets" / Path(suffix))
 
     if normalized.startswith("/app/"):
@@ -59,6 +60,7 @@ def creator_asset_path_candidates(stored_path: Any) -> list[Path]:
             relative = normalized.removeprefix("/app/data/output/").strip("/")
             if relative:
                 candidates.append(DEFAULT_OUTPUT_ROOT / Path(relative))
+                candidates.append((DEFAULT_PROJECT_ROOT / "data" / "output") / Path(relative))
                 candidates.append((DEFAULT_PROJECT_ROOT / "data" / "runtime" / "output") / Path(relative))
 
     unique: list[Path] = []
@@ -97,6 +99,30 @@ def creator_asset_ready(asset: dict[str, Any] | Any, *, category: str | None = N
         return False
     resolved_path = resolve_creator_asset_path(asset.get("stored_path"))
     return resolved_path.exists() and resolved_path.is_file()
+
+
+def creator_packaging_asset_types(assets: list[dict[str, Any] | Any]) -> set[str]:
+    packaging_types: set[str] = set()
+    for item in list(assets or []):
+        asset = item if isinstance(item, dict) else {
+            "asset_type": getattr(item, "asset_type", None),
+            "stored_path": getattr(item, "stored_path", None),
+            "metadata_json": getattr(item, "metadata_json", None),
+        }
+        if not creator_asset_ready(asset):
+            continue
+        category = normalize_creator_asset_category(asset.get("asset_type"))
+        if category in {"intro", "outro"}:
+            packaging_types.add(category)
+        elif category == "logo":
+            packaging_types.add("watermark")
+        elif category == "music_library":
+            packaging_types.add("music")
+    return packaging_types
+
+
+def creator_has_complete_packaging_assets(assets: list[dict[str, Any] | Any]) -> bool:
+    return {"intro", "watermark", "music"}.issubset(creator_packaging_asset_types(assets))
 
 
 def pick_creator_avatar_presenter_asset(assets: list[dict[str, Any] | Any]) -> dict[str, Any] | None:

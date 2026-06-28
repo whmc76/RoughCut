@@ -140,6 +140,16 @@ _BUILTIN_ENTITY_CATALOG: tuple[EntityCatalogEntry, ...] = (
         phrases=("MICROTECH S0", "S0 锆合金版折刀"),
         supporting_keywords=("折刀", "锆合金", "快开", "大宝剑", "背夹"),
     ),
+    EntityCatalogEntry(
+        brand="呼和",
+        model="",
+        subject_type="EDC折刀",
+        subject_domain="knife",
+        brand_aliases=(),
+        model_aliases=(),
+        phrases=("呼和 折刀",),
+        supporting_keywords=("折刀", "缎面", "缎面研磨", "开合", "背夹"),
+    ),
 )
 
 

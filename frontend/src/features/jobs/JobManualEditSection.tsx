@@ -145,6 +145,7 @@ type ManualEditUndoSnapshot = {
   editorNote: string;
   videoSummary: string;
   videoTransform: JobManualVideoTransform;
+  hyperframesOptions: Record<string, boolean>;
 };
 
 type FloatingPreviewPosition = {
@@ -217,6 +218,17 @@ type SmartCutRules = {
   fillers: string;
   catchphrases?: string;
 };
+
+function normalizeManualHyperframesOptions(value?: Record<string, boolean> | null): Record<string, boolean> {
+  return {
+    smart_effects: value?.smart_effects ?? true,
+    subtitle_emphasis: value?.subtitle_emphasis ?? true,
+    sound_cues: value?.sound_cues ?? true,
+    progress_bar: value?.progress_bar ?? false,
+    chapter_cards: value?.chapter_cards ?? true,
+    unified_subtitle_style: value?.unified_subtitle_style ?? true,
+  };
+}
 
 type SmartCutRuleKind = "filler" | "catchphrase" | "repeated" | "pause" | "smart_delete";
 type SmartCutFillerMode = "standalone" | "sentence_head" | "sentence_tail" | "continuous";
@@ -2082,6 +2094,8 @@ export function buildManualEditChangeList(options: {
   subtitleReplacements: JobManualSubtitleReplacement[];
   baseVideoTransform: JobManualVideoTransform;
   currentVideoTransform: JobManualVideoTransform;
+  baseHyperframesOptions: Record<string, boolean>;
+  currentHyperframesOptions: Record<string, boolean>;
   hasVideoSummaryEdits: boolean;
 }): ManualEditChangeListItem[] {
   const items: ManualEditChangeListItem[] = [];
@@ -2157,6 +2171,16 @@ export function buildManualEditChangeList(options: {
       detail: `${options.subtitleReplacements.length} 组替换，影响 ${replacementCount} 处`,
       meta: "写入校对习惯",
       tone: "subtitle",
+    });
+  }
+
+  if (Boolean(options.baseHyperframesOptions.progress_bar) !== Boolean(options.currentHyperframesOptions.progress_bar)) {
+    items.push({
+      key: "segmented-progress-bar",
+      title: "分段进度条",
+      detail: Boolean(options.currentHyperframesOptions.progress_bar) ? "关闭 -> 开启" : "开启 -> 关闭",
+      meta: "外挂包装",
+      tone: "video",
     });
   }
 
@@ -5724,6 +5748,7 @@ function cloneUndoSnapshot(snapshot: ManualEditUndoSnapshot): ManualEditUndoSnap
     manualSmartCutConfirmRanges: snapshot.manualSmartCutConfirmRanges.map((range) => ({ ...range })),
     manualSmartCutDismissRanges: snapshot.manualSmartCutDismissRanges.map((range) => ({ ...range })),
     videoTransform: { ...snapshot.videoTransform },
+    hyperframesOptions: { ...snapshot.hyperframesOptions },
   };
 }
 
@@ -5807,6 +5832,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
   const [manualSmartCutConfirmRanges, setManualSmartCutConfirmRanges] = useState<KeepSegment[]>([]);
   const [manualSmartCutDismissRanges, setManualSmartCutDismissRanges] = useState<KeepSegment[]>([]);
   const [videoTransform, setVideoTransform] = useState<JobManualVideoTransform>(() => normalizeVideoTransform(null));
+  const [hyperframesOptions, setHyperframesOptions] = useState<Record<string, boolean>>(() => normalizeManualHyperframesOptions(session.hyperframes_options));
   const [rotationDialogOpen, setRotationDialogOpen] = useState(false);
   const [rotationDraft, setRotationDraft] = useState(0);
   const [rotationDetectMessage, setRotationDetectMessage] = useState<string | null>(null);
@@ -5832,6 +5858,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
     editorNote,
     videoSummary,
     videoTransform: { ...normalizeVideoTransform(videoTransform) },
+    hyperframesOptions: { ...normalizeManualHyperframesOptions(hyperframesOptions) },
   });
 
   const recordUndoSnapshot = () => {
@@ -5861,6 +5888,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
     setEditorNote(restored.editorNote);
     setVideoSummary(restored.videoSummary);
     setVideoTransform(restored.videoTransform);
+    setHyperframesOptions(restored.hyperframesOptions);
     setRotationDraft(restored.videoTransform.rotation_cw);
     setResolutionDraft(restored.videoTransform);
     setRotationDialogOpen(false);
@@ -5914,6 +5942,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
     setHiddenTermKeys(new Set());
     const nextTransform = normalizeVideoTransform(session.video_transform);
     setVideoTransform(nextTransform);
+    setHyperframesOptions(normalizeManualHyperframesOptions(session.hyperframes_options));
     setRotationDraft(nextTransform.rotation_cw);
     setResolutionDraft(nextTransform);
     setRotationDialogOpen(false);
@@ -5921,11 +5950,11 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
     setRotationDetectMessage(null);
     timelinePlaybackRef.current = false;
     resumeAfterSubtitleEditRef.current = false;
-  }, [session.job_id, session.keep_segments, session.smart_cut_rules, session.subtitle_overrides, session.timeline_id, session.timeline_version, session.video_summary, session.video_transform]);
+  }, [session.hyperframes_options, session.job_id, session.keep_segments, session.smart_cut_rules, session.subtitle_overrides, session.timeline_id, session.timeline_version, session.video_summary, session.video_transform]);
 
   useEffect(() => {
     currentEditSnapshotRef.current = buildUndoSnapshot();
-  }, [currentSubtitleDraftText, editorNote, editingSubtitleIndex, manualSmartCutConfirmRanges, manualSmartCutDismissRanges, manualSmartCutRestoreRanges, segments, selectedSegmentIndex, selectedSubtitleIndex, subtitleDrafts, subtitleReplacementHistory, videoSummary, videoTransform]);
+  }, [currentSubtitleDraftText, editorNote, editingSubtitleIndex, hyperframesOptions, manualSmartCutConfirmRanges, manualSmartCutDismissRanges, manualSmartCutRestoreRanges, segments, selectedSegmentIndex, selectedSubtitleIndex, subtitleDrafts, subtitleReplacementHistory, videoSummary, videoTransform]);
 
   const effectiveSegments = useMemo(
     () => segments.filter((segment) => segment.end > segment.start + 0.05),
@@ -6178,9 +6207,12 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
   const currentVideoSummary = videoSummary.trim();
   const baseVideoTransform = useMemo(() => normalizeVideoTransform(session.base_video_transform), [session.base_video_transform]);
   const currentVideoTransform = useMemo(() => normalizeVideoTransform(videoTransform), [videoTransform]);
+  const baseHyperframesOptions = useMemo(() => normalizeManualHyperframesOptions(session.hyperframes_options), [session.hyperframes_options]);
+  const currentHyperframesOptions = useMemo(() => normalizeManualHyperframesOptions(hyperframesOptions), [hyperframesOptions]);
   const baseVideoRotation = baseVideoTransform.rotation_cw;
   const currentVideoRotation = currentVideoTransform.rotation_cw;
   const hasVideoTransformEdits = JSON.stringify(currentVideoTransform) !== JSON.stringify(baseVideoTransform);
+  const hasHyperframesOptionEdits = JSON.stringify(currentHyperframesOptions) !== JSON.stringify(baseHyperframesOptions);
   const hasVideoSummaryEdits = currentVideoSummary !== baseVideoSummary;
   const previewVideoSources = useMemo(
     () => normalizePreviewVideoSources(previewAssets, session.source_url),
@@ -6360,7 +6392,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
     [baseKeepSegments],
   );
   const outputDurationDelta = totalOutputDuration - initialOutputDuration;
-  const hasMaterialEdits = hasTimelineEdits || subtitleOverrides.length > 0 || hasVideoTransformEdits;
+  const hasMaterialEdits = hasTimelineEdits || subtitleOverrides.length > 0 || hasVideoTransformEdits || hasHyperframesOptionEdits;
   const visibleDraftSavedAt = autosavedAt || session.draft_saved_at || null;
   const manualEditorPayload = useMemo(
     () => ({
@@ -6372,6 +6404,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
       subtitle_replacements: subtitleReplacements,
       video_transform: currentVideoTransform,
       smart_cut_rules: smartCutRules,
+      hyperframes_options: currentHyperframesOptions,
       video_summary: currentVideoSummary || null,
       base_timeline_id: session.timeline_id,
       base_timeline_version: session.timeline_version,
@@ -6379,7 +6412,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
       base_subtitle_fingerprint: session.subtitle_fingerprint || null,
       note: editorNote.trim() || undefined,
     }),
-    [currentVideoSummary, currentVideoTransform, effectiveSegments, editorNote, session.render_plan_version, session.smart_cut_rules, session.subtitle_fingerprint, session.timeline_id, session.timeline_version, smartCutRules, subtitleOverrides, subtitleReplacements],
+    [currentHyperframesOptions, currentVideoSummary, currentVideoTransform, effectiveSegments, editorNote, session.render_plan_version, session.smart_cut_rules, session.subtitle_fingerprint, session.timeline_id, session.timeline_version, smartCutRules, subtitleOverrides, subtitleReplacements],
   );
   const savePlanLabel = hasTimelineEdits
     ? "剪辑变更：重建时间线/特效"
@@ -6387,6 +6420,8 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
       ? "画面方向变更：重新渲染"
       : subtitleOverrides.length
         ? "字幕变更：复用剪辑/特效计划"
+        : hasHyperframesOptionEdits
+          ? "外挂包装变更：重新渲染"
         : hasVideoSummaryEdits
           ? "摘要变更：更新审核/校对证据"
       : "暂无实质修改";
@@ -6396,6 +6431,8 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
       ? "会保存画面旋转参数，并从 render 开始重新生成成片、特效和数字人版本。"
       : subtitleOverrides.length
         ? "会保存字幕文本/时间修改，复用当前剪辑和特效计划重新烧录字幕层。"
+        : hasHyperframesOptionEdits
+          ? "会保存外挂包装开关，并从 render 开始重新生成成片。"
         : hasVideoSummaryEdits
           ? "会把人工视频摘要写入内容画像和下游上下文，作为自动审核与字幕校对的强证据。"
       : "当前没有检测到剪辑、画面方向或字幕修改。";
@@ -6410,9 +6447,11 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
       subtitleReplacements,
       baseVideoTransform,
       currentVideoTransform,
+      baseHyperframesOptions,
+      currentHyperframesOptions,
       hasVideoSummaryEdits,
     }),
-    [baseKeepSegments, baseProjection.remapped, baseVideoTransform, currentVideoTransform, effectiveSegments, hasVideoSummaryEdits, outputDurationDelta, subtitleOverrides, subtitleReplacements],
+    [baseHyperframesOptions, baseKeepSegments, baseProjection.remapped, baseVideoTransform, currentHyperframesOptions, currentVideoTransform, effectiveSegments, hasVideoSummaryEdits, outputDurationDelta, subtitleOverrides, subtitleReplacements],
   );
   const hasManualEditChangeListItems = manualEditChangeList.some((item) => item.tone !== "empty");
   useEffect(() => {
@@ -8141,6 +8180,33 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
             </li>
           ))}
         </ul>
+      </section>
+
+      <section className="manual-editor-change-list" aria-label="外挂包装">
+        <div className="manual-editor-change-list-head">
+          <div>
+            <strong>外挂包装</strong>
+            <div className="muted compact-top">分段进度条会按 ASR 语义章节烧录到成片底部；关闭后重渲染即可移除。</div>
+          </div>
+          <span className={classNames("status-pill", currentHyperframesOptions.progress_bar ? "done" : "pending")}>
+            {currentHyperframesOptions.progress_bar ? "已开启" : "未开启"}
+          </span>
+        </div>
+        <label className="job-upload-enhancement-option manual-editor-packaging-toggle">
+          <input
+            type="checkbox"
+            disabled={!session.editable}
+            checked={Boolean(currentHyperframesOptions.progress_bar)}
+            onChange={(event) => {
+              recordUndoSnapshot();
+              setHyperframesOptions({
+                ...currentHyperframesOptions,
+                progress_bar: event.target.checked,
+              });
+            }}
+          />
+          <span>分段进度条</span>
+        </label>
       </section>
 
       {session.detail ? <div className="notice compact-top">{session.detail}</div> : null}

@@ -20,6 +20,21 @@ def test_detect_subtitle_language_uses_canonical_surface() -> None:
     assert language == "zh-CN"
 
 
+def test_auto_translation_target_uses_english_chinese_pair() -> None:
+    assert st.resolve_translation_target_language(
+        source_language="zh-CN",
+        target_language=None,
+        target_language_mode="auto",
+        preferred_ui_language="zh-CN",
+    ) == "en"
+    assert st.resolve_translation_target_language(
+        source_language="en-US",
+        target_language=None,
+        target_language_mode="auto",
+        preferred_ui_language="zh-CN",
+    ) == "zh-CN"
+
+
 @pytest.mark.asyncio
 async def test_translate_subtitle_chunk_uses_canonical_surface() -> None:
     captured: dict[str, object] = {}

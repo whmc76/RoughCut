@@ -69,6 +69,7 @@ export type UploadForm = {
   hyperframesOptions: Record<string, boolean>;
   creatorCardId: string;
   executionMode: string;
+  autoGeneratePublicationMaterials: boolean;
   platformTargets: string[];
   translationTargetLanguage: string;
   taskBrief: string;

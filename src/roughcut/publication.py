@@ -34,6 +34,7 @@ from roughcut.publication_platform_matrix import (
     platform_allows_field_edits_while_processing,
     platform_auto_publish_disabled_reason,
     platform_auto_publish_supported,
+    platform_content_contract,
     platform_cover_project_mode,
     platform_cover_asset_policy,
     platform_default_declaration,
@@ -44,8 +45,10 @@ from roughcut.publication_platform_matrix import (
     platform_publish_entry_url,
     platform_publish_projects,
     platform_required_cover_slots,
+    platform_requires_body_entry,
     platform_requires_custom_cover_policy,
     platform_requires_explicit_collection_policy,
+    platform_requires_title_entry,
     platform_stop_when_current_page_already_correct,
     platform_supports_scheduled_publish,
     platform_upload_processing_blocks_final_publish_only,
@@ -62,12 +65,14 @@ from roughcut.publication_social_auto_upload import (
 from roughcut.publication_packaging import (
     derive_publication_cover_slots,
     load_publication_packaging_payload,
+    normalize_publication_packaging_payload,
     publication_packaging_entry_publish_ready,
     publication_primary_cover_path,
 )
 
 CANONICAL_PUBLICATION_ADAPTER = "browser_agent"
 BROWSER_AGENT_PUBLICATION_RUN_CONTRACT = "browser_agent_publication_v1"
+PUBLICATION_RECEIPT_STATE_CONTRACT_VERSION = "roughcut.publication_receipt_state.v1"
 PUBLICATION_BROWSER_AGENT_TASK_IDENTITY_CONTRACT = "publication_task_identity_v1"
 PUBLICATION_BROWSER_AGENT_CREATOR_SESSION_CONTRACT = "publication_creator_session_probe_v1"
 X_LINK_SHARE_PUBLICATION_ADAPTER = "x_link_share"
@@ -342,6 +347,131 @@ def _publication_auto_publish_disabled_message(platform: str) -> str:
     return f"{platform_label(platform)}：{reason}"
 
 
+def _build_publication_material_targets(
+    *,
+    packages: dict[str, dict[str, Any]],
+    credential_by_platform: dict[str, dict[str, Any]],
+    requested_platforms: set[str],
+    source_media_path: Path | None,
+    media_path: Path | None,
+) -> list[dict[str, Any]]:
+    material_platforms = requested_platforms or set(packages)
+    material_targets: list[dict[str, Any]] = []
+    for platform in sorted((platform for platform in material_platforms if platform in packages), key=_platform_sort_key):
+        package = packages.get(platform) or {}
+        credential = credential_by_platform.get(platform) or {}
+        package_cover_contract = {
+            **package,
+            "platform": platform,
+            "key": platform,
+        }
+        primary_cover_path, cover_slots = _resolve_authoritative_publication_cover_contract(
+            package_cover_contract,
+            platform=platform,
+            requested_media_path=str(source_media_path or media_path or ""),
+        )
+        body = str(package.get("description") or package.get("body") or "").strip()
+        tags = [str(item).strip() for item in (package.get("tags") or []) if str(item).strip()]
+        titles = [str(item).strip() for item in (package.get("titles") or []) if str(item).strip()]
+        title = _truncate_publication_title(
+            _package_primary_title(package),
+            _publication_title_hard_limit(platform, {}),
+        )
+        copy_material = dict(package.get("copy_material")) if isinstance(package.get("copy_material"), dict) else {}
+        contract = platform_content_contract(platform)
+        has_title = _publication_package_requires_title(platform, package)
+        title_label = str(
+            package.get("title_label") or copy_material.get("title_label") or contract.get("title_label") or "标题"
+        ).strip()
+        body_label = str(
+            package.get("body_label") or copy_material.get("body_label") or contract.get("body_label") or "正文"
+        ).strip() or "正文"
+        tag_label = str(
+            package.get("tag_label") or copy_material.get("tag_label") or contract.get("tag_label") or "标签"
+        ).strip()
+        package_constraints = package.get("constraints") if isinstance(package.get("constraints"), dict) else {}
+        constraints = {
+            "title_limit": int(contract.get("title_limit") or 0),
+            "body_limit": int(contract.get("body_limit") or 0),
+            "tag_limit": int(contract.get("tag_limit") or 0),
+            "tag_style": str(contract.get("tag_style") or "").strip(),
+            **dict(package_constraints),
+        }
+        separate_tags = bool(contract.get("separate_tags"))
+        tags_embedded_in_body = bool(contract.get("tags_embedded_in_body"))
+        copy_material.update(
+            {
+                "has_title": has_title,
+                "title_label": title_label,
+                "body_label": body_label,
+                "tag_label": tag_label,
+                "separate_tags": separate_tags,
+                "tags_embedded_in_body": tags_embedded_in_body,
+                "constraints": dict(constraints),
+                "primary_title": title,
+                "titles": titles,
+                "body": body,
+                "tags": tags,
+                "cover_path": primary_cover_path,
+                "cover_slots": [dict(item) for item in cover_slots],
+                "full_copy": str(package.get("full_copy") or "").strip(),
+            }
+        )
+        if "source" not in copy_material:
+            copy_material["source"] = "platform_packaging"
+        material_targets.append(
+            {
+                "platform": platform,
+                "platform_label": platform_label(platform),
+                "credential_id": str(credential.get("id") or ""),
+                "credential_ref": str(credential.get("credential_ref") or ""),
+                "browser_profile_id": str(
+                    credential.get("browser_profile_id")
+                    or credential.get("credential_ref")
+                    or credential.get("account_label")
+                    or platform
+                ),
+                "browser_binding": credential.get("browser_binding") if isinstance(credential.get("browser_binding"), dict) else {},
+                "account_label": str(credential.get("account_label") or "").strip(),
+                "adapter": _resolve_publication_target_adapter(platform, credential.get("adapter")),
+                "execution_mode": str(credential.get("execution_mode") or BROWSER_AGENT_EXECUTION_MODE).strip()
+                or BROWSER_AGENT_EXECUTION_MODE,
+                "content_kind": "video",
+                "has_title": has_title,
+                "title_label": title_label,
+                "body_label": body_label,
+                "tag_label": tag_label,
+                "separate_tags": separate_tags,
+                "tags_embedded_in_body": tags_embedded_in_body,
+                "constraints": dict(constraints),
+                "publish_projects": platform_publish_projects(platform),
+                "title": title,
+                "titles": titles,
+                "body": body,
+                "description": body,
+                "declaration": str(package.get("declaration") or "").strip() or platform_default_declaration(platform),
+                "tags": tags,
+                "cover_path": primary_cover_path,
+                "cover_slots": [dict(item) for item in cover_slots],
+                "full_copy": str(package.get("full_copy") or "").strip(),
+                "copy_material": copy_material,
+                "category": str(package.get("category") or "").strip(),
+                "collection": package.get("collection") if isinstance(package.get("collection"), dict) else None,
+                "native_topics": [str(item).strip() for item in (package.get("native_topics") or []) if str(item).strip()],
+                "visibility_or_publish_mode": str(package.get("visibility_or_publish_mode") or "").strip(),
+                "scheduled_publish_at": str(package.get("scheduled_publish_at") or "").strip(),
+                "platform_specific_overrides": (
+                    dict(package.get("platform_specific_overrides"))
+                    if isinstance(package.get("platform_specific_overrides"), dict)
+                    else {}
+                ),
+                "manual_publish_entry_url": platform_manual_publish_entry_url(platform),
+                "status": "material_ready",
+            }
+        )
+    return material_targets
+
+
 def _normalize_publication_browser_path(value: Any) -> str | None:
     text = str(value or "").strip().replace("\\", "/")
     if not text:
@@ -557,6 +687,31 @@ async def check_publication_browser_agent_ready(
             "ready": False,
             "code": "browser_agent_task_identity_contract_unsupported",
             "message": "当前 browser-agent 未声明 attempt_id/content_id 回显合同，已阻止继续发布以避免终态无法回写 attempt。",
+            "health": payload,
+        }
+    if requested_platforms and capabilities.get("task_owned_platform_pages") is not True:
+        return {
+            "ready": False,
+            "code": "browser_agent_task_owned_platform_pages_unsupported",
+            "message": "当前 browser-agent 未声明任务自有发布页能力，已阻止继续发布以避免依赖预先打开的后台标签页。",
+            "health": payload,
+        }
+    route_capability = capabilities.get("platform_route_capability")
+    route_capability = route_capability if isinstance(route_capability, dict) else {}
+    missing_route_capability = [
+        platform
+        for platform in requested_platforms
+        if not (
+            isinstance(route_capability.get(platform), dict)
+            and str(route_capability[platform].get("publish_entry_url") or "").strip()
+        )
+    ]
+    if missing_route_capability:
+        labels = "、".join(platform_label(platform) for platform in missing_route_capability)
+        return {
+            "ready": False,
+            "code": "browser_agent_platform_route_capability_missing",
+            "message": f"browser-agent 未声明这些平台的安全发布入口路由：{labels}；已阻止继续发布。",
             "health": payload,
         }
     local_runtime_sha256 = _local_publication_browser_agent_service_sha256()
@@ -826,15 +981,15 @@ def normalize_publication_credentials(value: Any) -> list[dict[str, Any]]:
         credential_ref = str(item.get("credential_ref") or item.get("browser_profile") or "").strip()
         account_label = str(item.get("account_label") or item.get("account") or "").strip()
         status = str(item.get("status") or "unverified").strip().lower().replace("-", "_")
-        adapter = _normalize_publication_adapter(item.get("adapter"))
-        if str(credential_ref or "").strip().startswith("social-auto-upload:"):
-            adapter = SOCIAL_AUTO_UPLOAD_ADAPTER
         enabled = bool(item.get("enabled", True))
         browser_binding = normalize_publication_browser_binding(
             item.get("browser_binding")
             if isinstance(item.get("browser_binding"), dict)
             else item
         )
+        adapter = _normalize_publication_adapter(item.get("adapter"))
+        if str(credential_ref or "").strip().startswith("social-auto-upload:"):
+            adapter = CANONICAL_PUBLICATION_ADAPTER if browser_binding else SOCIAL_AUTO_UPLOAD_ADAPTER
         browser_profile_id = (
             str(item.get("browser_profile_id") or "").strip()
             or str(browser_binding.get("profile_id") or "").strip()
@@ -1153,13 +1308,14 @@ def build_publication_plan(
             blocked_reasons.append("发布视频源与最终成片输出不一致，已阻断发布。")
 
     recovered_packaging = None
-    effective_platform_packaging = platform_packaging
-    packages = _normalize_platform_packages(platform_packaging)
+    effective_platform_packaging = _normalize_publication_plan_packaging_payload(platform_packaging)
+    packages = _normalize_platform_packages(effective_platform_packaging)
     if not packages:
         recovered_packaging = _recover_publication_packaging_from_existing_attempts(
             existing_attempts,
             requested_platforms=sorted(requested),
         )
+        recovered_packaging = _normalize_publication_plan_packaging_payload(recovered_packaging)
         packages = _normalize_platform_packages(recovered_packaging)
         if packages:
             effective_platform_packaging = recovered_packaging
@@ -1172,6 +1328,13 @@ def build_publication_plan(
 
     credential_by_platform = {item["platform"]: item for item in credentials}
     options_by_platform = _normalize_publication_platform_options(platform_options)
+    material_targets = _build_publication_material_targets(
+        packages=packages,
+        credential_by_platform=credential_by_platform,
+        requested_platforms=requested,
+        source_media_path=source_media_path,
+        media_path=media_path,
+    )
     candidate_platforms = requested or {
         platform for platform in STABLE_PUBLICATION_PLATFORM_SET if platform_auto_publish_supported(platform)
     }
@@ -1497,6 +1660,7 @@ def build_publication_plan(
         "creator_profile_name": str((creator_profile or {}).get("display_name") or ""),
         "media_path": str(media_path) if media_path else None,
         "source_media_path": str(source_media_path or "").strip() or (str(media_path) if media_path else None),
+        "material_targets": material_targets,
         "targets": targets,
         "manual_handoff_targets": manual_handoff_targets,
         "existing_attempts": list(existing_attempts or [])[:20],
@@ -1513,6 +1677,14 @@ def publication_plan_is_manual_handoff_ready(plan: dict[str, Any] | None) -> boo
     if plan.get("targets"):
         return False
     return bool(plan.get("manual_handoff_targets"))
+
+
+def _normalize_publication_plan_packaging_payload(packaging: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(packaging, dict):
+        return None
+    material_dir = str(packaging.get("material_dir") or "").strip() or None
+    normalized = normalize_publication_packaging_payload(packaging, material_dir=material_dir)
+    return normalized if isinstance(normalized, dict) else packaging
 
 
 def publication_plan_status(plan: dict[str, Any] | None) -> str:
@@ -6272,6 +6444,11 @@ async def _apply_browser_agent_task_state(
     )
     if public_url:
         attempt.external_url = public_url
+    public_url_required_for_success = (
+        str(getattr(attempt, "platform", "") or "").strip().lower() in STABLE_PUBLICATION_PLATFORM_SET
+        and str(_normalize_publication_adapter(getattr(attempt, "adapter", ""))) != X_LINK_SHARE_PUBLICATION_ADAPTER
+        and not bound_receipt_verification_success
+    )
     if strict_success_verification and not bound_receipt_verification_success:
         if mapped_status == "published":
             if not public_url:
@@ -6316,6 +6493,27 @@ async def _apply_browser_agent_task_state(
                 "code": "publication_schedule_receipt_missing",
                 "message": "发布反馈为预约中，但未读到预约时间回执；请确认发布页是否真正落定。",
             }
+    if mapped_status == "published" and public_url_required_for_success and not public_url:
+        mapped_status = "needs_human"
+        error = {
+            "code": "publication_public_url_missing",
+            "message": "平台后台显示已发布，但未读到可公开访问链接；请完成公网 URL 回查后再标记 published。",
+        }
+    receipt_state = _build_publication_receipt_state(
+        mapped_status=mapped_status,
+        raw_status=raw_status,
+        public_url=public_url,
+        scheduled_at=attempt.scheduled_at,
+        error=error,
+        result=result,
+        task=task,
+        bound_receipt_verification_success=bound_receipt_verification_success,
+        stop_before_verification_success=stop_before_verification_success,
+    )
+    response_payload["publication_receipt_state"] = receipt_state
+    publication_locator = _build_publication_locator(result=result, task=task, public_url=public_url)
+    if publication_locator:
+        response_payload["publication_locator"] = publication_locator
     attempt.status = mapped_status
     attempt.run_status = mapped_status
     error_code = str(error.get("code") or task.get("error_code") or raw_status or "").strip()
@@ -6463,6 +6661,105 @@ def _extract_browser_agent_task(payload: dict[str, Any]) -> dict[str, Any]:
         if isinstance(value, dict) and (value.get("status") or value.get("state") or value.get("task_id") or value.get("id")):
             return value
     return payload if isinstance(payload, dict) else {}
+
+
+def _build_publication_receipt_state(
+    *,
+    mapped_status: str,
+    raw_status: str,
+    public_url: str | None,
+    scheduled_at: datetime | None,
+    error: dict[str, Any] | None,
+    result: dict[str, Any],
+    task: dict[str, Any],
+    bound_receipt_verification_success: bool,
+    stop_before_verification_success: bool,
+) -> dict[str, Any]:
+    error_code = str((error or {}).get("code") or "").strip()
+    normalized_status = str(mapped_status or "").strip().lower()
+    normalized_raw = str(raw_status or "").strip().lower().replace("-", "_")
+    if public_url and normalized_status == "published":
+        state = "verified_public_url"
+        lookup_required = False
+        next_actions: list[str] = []
+    elif error_code == "publication_public_url_missing" or (
+        normalized_raw == "published" and normalized_status == "needs_human" and not public_url
+    ):
+        state = "manager_published_status_verified_public_url_required"
+        lookup_required = True
+        next_actions = ["public_url_lookup", "operator_verify_public_url"]
+    elif normalized_status == "scheduled_pending":
+        state = "scheduled_pending"
+        lookup_required = True
+        next_actions = ["follow_up_public_url_lookup"]
+    elif normalized_status == "draft_created" or stop_before_verification_success:
+        state = "draft_created"
+        lookup_required = False
+        next_actions = ["operator_final_publish"]
+    elif bound_receipt_verification_success:
+        state = "bound_receipt_verified"
+        lookup_required = not bool(public_url)
+        next_actions = ["public_url_lookup"] if lookup_required else []
+    else:
+        state = normalized_status or normalized_raw or "unknown"
+        lookup_required = False
+        next_actions = ["operator_review"] if normalized_status in {"needs_human", "failed"} else []
+    if scheduled_at is not None and state == "scheduled_pending":
+        next_actions = ["follow_up_public_url_lookup"]
+    return {
+        "contract_version": PUBLICATION_RECEIPT_STATE_CONTRACT_VERSION,
+        "state": state,
+        "attempt_status": normalized_status,
+        "provider_status": raw_status,
+        "verified_public_url": public_url or None,
+        "public_url_lookup_required": bool(lookup_required),
+        "scheduled_at": _iso_or_none(scheduled_at),
+        "recommended_next_actions": next_actions,
+        "manager_status": _extract_publication_manager_status(result, task),
+    }
+
+
+def _extract_publication_manager_status(result: dict[str, Any], task: dict[str, Any]) -> str:
+    for payload in (result, task):
+        for key in ("manager_status", "backstage_status", "platform_status", "status", "state"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value[:120]
+    return ""
+
+
+def _build_publication_locator(
+    *,
+    result: dict[str, Any],
+    task: dict[str, Any],
+    public_url: str | None,
+) -> dict[str, Any]:
+    route = _extract_route_snapshot(result) or _extract_route_snapshot(task)
+    manager_url = _first_publication_locator_url(result, task, require_public=False)
+    locator: dict[str, Any] = {}
+    if public_url:
+        locator["public_url"] = public_url
+    if manager_url and manager_url != public_url:
+        locator["manager_url"] = manager_url
+    if route:
+        locator["route"] = route
+    return locator
+
+
+def _first_publication_locator_url(*payloads: dict[str, Any], require_public: bool) -> str | None:
+    for payload in payloads:
+        for key in ("public_url", "post_url", "url", "external_url", "manager_url", "receipt_url"):
+            value = str(payload.get(key) or "").strip()
+            if not value:
+                continue
+            if require_public and not _looks_like_public_publication_url(value):
+                continue
+            return value
+        route = payload.get("route") if isinstance(payload.get("route"), dict) else {}
+        value = str(route.get("url") or "").strip()
+        if value and (not require_public or _looks_like_public_publication_url(value)):
+            return value
+    return None
 
 
 def _first_public_url(*payloads: dict[str, Any]) -> str | None:
@@ -7612,6 +7909,28 @@ def _package_has_publish_copy(package: dict[str, Any]) -> bool:
     return bool(_package_primary_title(package) or str(package.get("description") or package.get("body") or "").strip())
 
 
+def _publication_package_requires_title(platform: str, package: dict[str, Any]) -> bool:
+    if "has_title" in package:
+        return bool(package.get("has_title"))
+    copy_material = package.get("copy_material") if isinstance(package.get("copy_material"), dict) else {}
+    if "has_title" in copy_material:
+        return bool(copy_material.get("has_title"))
+    constraints = package.get("constraints") if isinstance(package.get("constraints"), dict) else {}
+    try:
+        title_limit = int(constraints.get("title_limit"))
+    except (TypeError, ValueError):
+        title_limit = None
+    if title_limit is not None and title_limit <= 0:
+        return False
+    return platform_requires_title_entry(platform)
+
+
+def _publication_package_requires_body(platform: str, package: dict[str, Any]) -> bool:
+    if "has_body" in package:
+        return bool(package.get("has_body"))
+    return platform_requires_body_entry(platform)
+
+
 def _package_primary_title(package: dict[str, Any]) -> str:
     titles = package.get("titles")
     if isinstance(titles, list):
@@ -7639,9 +7958,9 @@ def _publication_material_quality_blocking_reasons(
     reasons: list[str] = []
     normalized_title = re.sub(r"\s+", " ", str(title or "").strip())
     normalized_body = re.sub(r"\s+", " ", str(body or "").strip())
-    if normalized_platform != "x":
-        if not normalized_title:
-            reasons.append("标题为空，不能自动发布。")
+    if _publication_package_requires_title(normalized_platform, package) and not normalized_title:
+        reasons.append("标题为空，不能自动发布。")
+    if _publication_package_requires_body(normalized_platform, package):
         if not normalized_body:
             reasons.append("正文/说明为空，不能自动发布。")
         elif normalized_platform == "youtube" and len(normalized_body) < 20:

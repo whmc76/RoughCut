@@ -12,6 +12,7 @@ from typing import Any
 import uuid
 
 from roughcut.config import get_settings
+from roughcut.media.rotation import build_orientation_video_filter
 from roughcut.media.silence import detect_silence
 
 MANUAL_EDITOR_PREVIEW_ARTIFACT_TYPE = "manual_editor_preview_assets"
@@ -453,16 +454,7 @@ def _assert_proxy_video_decodable(video_path: Path) -> None:
 
 
 def _orientation_video_filter(orientation_decision: dict[str, Any] | None) -> str:
-    rotation_cw = int(_normalize_orientation_decision(orientation_decision).get("rotation_cw") or 0)
-    filters: list[str] = []
-    if rotation_cw == 90:
-        filters.append("transpose=1")
-    elif rotation_cw == 180:
-        filters.extend(["hflip", "vflip"])
-    elif rotation_cw == 270:
-        filters.append("transpose=2")
-    filters.append("sidedata=mode=delete:type=DISPLAYMATRIX")
-    return ",".join(filters)
+    return build_orientation_video_filter(orientation_decision)
 
 
 def _manual_editor_proxy_video_filter(orientation_decision: dict[str, Any] | None) -> str:

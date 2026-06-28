@@ -4347,7 +4347,7 @@ async def test_minimax_image_backend_edits_cover_with_same_prompt_shape(tmp_path
     assert metadata["aspect_ratio"] == "9:16"
     assert metadata["request_id"] == "mini-job-1"
     assert calls["url"] == "https://api.minimaxi.com/v1/image_generation"
-    assert calls["headers"]["Authorization"] == "Bearer mini-secret"
+    assert calls["headers"]["Authorization"] == "Bearer <test-api-key>"
     assert calls["json"]["prompt"] == "生成封面"
     assert calls["json"]["width"] == 1080
     assert calls["json"]["height"] == 1920
@@ -5959,6 +5959,80 @@ async def test_revalidate_existing_cover_generation_request_rewrites_stale_faile
     assert "bitmap_title_contract_check_unavailable" not in payload
 
 
+@pytest.mark.asyncio
+async def test_revalidate_existing_local_overlay_cover_reapplies_request_title_lines(tmp_path, monkeypatch) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    output_path = material_dir / "00-cover-landscape_4_3.jpg"
+    request_path = material_dir / "00-cover-landscape_4_3.codex-imagegen.json"
+    Image.new("RGB", (1440, 1080), "black").save(output_path)
+    expected_lines = {
+        "brand": "呼和魂二 五彩碳马特",
+        "top": "呼和魂二 五彩碳马特",
+        "main": "EDC折刀 呼和魂二 五彩碳马限量",
+        "hook": "开箱实拍",
+    }
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "backend": "codex_builtin",
+                "generated_by_codex_bridge": True,
+                "output_path": str(output_path),
+                "target_size": {"width": 1440, "height": 1080},
+                "cover_hard_contract": {
+                    "post_title_overlay_required": True,
+                    "brand_model_title_required": True,
+                    "config_subtitle_required": True,
+                    "required_title_lines": expected_lines,
+                },
+                "cover_director_policy": {"typography_owner": "local_post_overlay"},
+                "post_title_overlay_applied": True,
+                "post_title_overlay_lines": {
+                    "brand": "20把 呼和魂二·五",
+                    "top": "20把 呼和魂二·五",
+                    "main": "彩碳马限量版",
+                    "hook": "开箱实拍",
+                },
+                "bitmap_unexpected_text_checked_at": "2026-06-03T10:01:03+08:00",
+                "bitmap_unexpected_text_detected": False,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    generation = {
+        "source": "image_generation",
+        "image_generation": {
+            "status": "completed",
+            "backend": "codex_builtin",
+            "output_path": str(output_path),
+            "request_path": str(request_path),
+        },
+    }
+    applied: dict[str, object] = {}
+
+    async def fake_overlay(**kwargs):
+        applied["title_lines"] = dict(kwargs["title_lines"] or {})
+
+    monkeypatch.setattr(ic, "_apply_platform_cover_title_overlay", fake_overlay)
+    monkeypatch.setattr("roughcut.review.intelligent_copy_cover_quality._read_image_dimensions", lambda path: (1440, 1080, None))
+
+    refreshed = await ic._revalidate_existing_cover_generation_request(
+        generation=generation,
+        output_path=output_path,
+        material_dir=material_dir,
+        rules={"label": "4:3 横版母版", "cover_size": (1440, 1080), "visual_instruction": ""},
+        cover_brief={"cover_title": "20把 呼和魂二·五彩碳马限量版"},
+    )
+
+    assert refreshed is not None
+    assert applied["title_lines"] == expected_lines
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    assert payload["post_title_overlay_lines"] == expected_lines
+    assert refreshed["publish_ready"] is True
+
+
 def test_mark_cover_bitmap_title_contract_verified_finalizes_pending_request_with_existing_output(tmp_path) -> None:
     output_path = tmp_path / "00-cover-landscape_4_3.jpg"
     request_path = tmp_path / "00-cover-landscape_4_3.codex-imagegen.json"
@@ -6290,6 +6364,122 @@ def test_collect_reusable_platform_materials_ignores_cover_blockers() -> None:
     assert list(reusable.keys()) == ["douyin"]
     assert reusable["douyin"]["blocking_reasons"] == ["封面图像生成未完成"]
     assert reusable["douyin"]["body"] == "MAXACE美杜莎4到货了，上手看顶配和次顶配的差别。"
+
+
+@pytest.mark.asyncio
+async def test_generate_intelligent_copy_force_regenerate_rewrites_reusable_material(tmp_path, monkeypatch) -> None:
+    source_dir = tmp_path / "MAXACE 美杜莎4 顶配次顶配开箱"
+    source_dir.mkdir()
+    video_path = source_dir / "MAXACE 美杜莎4 顶配次顶配开箱.mp4"
+    subtitle_path = source_dir / "MAXACE 美杜莎4 顶配次顶配开箱.srt"
+    material_dir = source_dir / "smart-copy"
+    material_dir.mkdir()
+    video_path.write_bytes(b"video")
+    subtitle_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nMAXACE 美杜莎4 到货了\n", encoding="utf-8")
+    smart_copy_material_json_path(material_dir).parent.mkdir(parents=True, exist_ok=True)
+    smart_copy_material_json_path(material_dir).write_text(
+        json.dumps(
+            {
+                "source_signature": ic._build_intelligent_copy_source_signature(
+                    video_path=video_path,
+                    subtitle_path=subtitle_path,
+                ),
+                "platforms": [
+                    {
+                        "key": "douyin",
+                        "label": "抖音",
+                        "has_title": True,
+                        "body_label": "描述",
+                        "tag_label": "标签",
+                        "titles": ["旧封面旧标题"],
+                        "primary_title": "旧封面旧标题",
+                        "body": "旧 smart-copy 平台物料。",
+                        "tags": ["旧物料"],
+                        "tags_copy": "#旧物料",
+                        "full_copy": "旧封面旧标题\n\n旧 smart-copy 平台物料。",
+                        "publish_ready": False,
+                        "blocking_reasons": ["封面图像生成未完成"],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        ic,
+        "inspect_intelligent_copy_folder",
+        lambda _folder: {
+            "folder_path": str(source_dir),
+            "material_dir": str(material_dir),
+            "video_file": str(video_path),
+            "subtitle_file": str(subtitle_path),
+            "cover_file": None,
+            "extra_video_files": [],
+            "extra_subtitle_files": [],
+            "extra_cover_files": [],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(ic, "_load_subtitle_items", lambda _path: [{"text_final": "MAXACE 美杜莎4 到货了"}])
+    monkeypatch.setattr(ic, "list_packaging_assets", lambda: {"config": {}})
+    monkeypatch.setattr(
+        ic,
+        "_build_intelligent_copy_fast_profile",
+        lambda **_kwargs: {"subject_model": "MAXACE 美杜莎4", "subject_type": "EDC折刀"},
+    )
+    monkeypatch.setattr(ic, "_build_intelligent_copy_brief", lambda **_kwargs: {"topic_subject": "MAXACE 美杜莎4"})
+
+    async def fake_generate_platform_packaging(**kwargs):
+        assert kwargs.get("target_platforms") == ["douyin"]
+        return {
+            "highlights": {"product": "MAXACE 美杜莎4"},
+            "platforms": {
+                "douyin": {
+                    "titles": ["MAXACE美杜莎4重新生成"],
+                    "description": "这次必须重建平台物料和封面。",
+                    "tags": ["MAXACE", "美杜莎4"],
+                }
+            },
+        }
+
+    async def fake_build_cover_brief(**_kwargs):
+        return {
+            "cover_title": "MAXACE美杜莎4重新生成",
+            "video_type": "开箱体验",
+            "product_identity": "MAXACE 美杜莎4",
+            "selling_angle": "顶配次顶配对比",
+            "visual_brief": "主体真实，标题居中。",
+        }
+
+    async def fake_prepare_cover_source(**_kwargs):
+        return None
+
+    rendered_force_flags: list[bool] = []
+
+    async def fake_render_cover_group(**kwargs):
+        rendered_force_flags.append(bool(kwargs.get("force_regenerate")))
+        return {"publish_ready": True, "blocking_reasons": []}
+
+    written_keys: list[str] = []
+
+    def fake_write_platform_material_files(*, material_dir, index, material):
+        written_keys.append(str(material.get("key") or ""))
+
+    monkeypatch.setattr(ic, "generate_platform_packaging", fake_generate_platform_packaging)
+    monkeypatch.setattr(ic, "_build_intelligent_cover_brief", fake_build_cover_brief)
+    monkeypatch.setattr(ic, "save_platform_packaging_markdown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ic, "_prepare_intelligent_copy_cover_source", fake_prepare_cover_source)
+    monkeypatch.setattr(ic, "_render_or_reuse_platform_cover_group", fake_render_cover_group)
+    monkeypatch.setattr(ic, "_write_platform_material_files", fake_write_platform_material_files)
+
+    result = await ic.generate_intelligent_copy(str(source_dir), platforms=["douyin"], force_regenerate=True)
+
+    assert written_keys == ["douyin"]
+    assert rendered_force_flags == [True]
+    assert result["platforms"][0]["primary_title"] == "MAXACE美杜莎4重新生成"
+    assert result["platforms"][0].get("_reused_from_existing_files") is None
 
 
 def test_finalize_cover_request_generation_status_recovers_pending_request_after_overlay(tmp_path) -> None:

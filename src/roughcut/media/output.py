@@ -2343,7 +2343,7 @@ def write_srt_file(subtitle_items: list[dict], output_path: Path) -> Path:
                     "text": segment["text"],
                 }
             )
-    final_segments = _merge_orphan_srt_cues(display_segments)
+    final_segments = _merge_short_srt_flash_cues(_merge_orphan_srt_cues(display_segments))
     final_validation_issues = _collect_srt_timeline_issues(final_segments)
     if final_validation_issues:
         raise ValueError("invalid_subtitle_timeline: " + "; ".join(final_validation_issues))
@@ -2405,6 +2405,9 @@ def _normalize_srt_timeline_for_serialization(
 
 _SRT_ORPHAN_SINGLE_PREFER_RIGHT = {"你", "我", "他", "她", "它", "这", "那", "把", "给", "就", "再", "才", "一"}
 _SRT_FILLER_SINGLE_CJK = {"呃", "额", "啊", "嗯", "唔", "哦", "噢", "吧", "嘛"}
+_SRT_SHORT_FLASH_DURATION_SEC = 0.35
+_SRT_SHORT_FLASH_MAX_GAP_SEC = 0.62
+_SRT_SHORT_FLASH_MAX_MERGED_CHARS = 48
 
 
 def _merge_orphan_srt_cues(subtitle_items: list[dict[str, Any]], *, max_chars: int = 24) -> list[dict[str, Any]]:
@@ -2449,6 +2452,95 @@ def _merge_orphan_srt_cues(subtitle_items: list[dict[str, Any]], *, max_chars: i
         index += 1
 
     return merged
+
+
+def _merge_short_srt_flash_cues(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    min_duration_sec: float = _SRT_SHORT_FLASH_DURATION_SEC,
+    max_gap_sec: float = _SRT_SHORT_FLASH_MAX_GAP_SEC,
+    max_merged_chars: int = _SRT_SHORT_FLASH_MAX_MERGED_CHARS,
+) -> list[dict[str, Any]]:
+    if len(subtitle_items) <= 1:
+        return [dict(item) for item in subtitle_items]
+
+    merged = [dict(item) for item in sorted(subtitle_items, key=_subtitle_srt_sort_key)]
+    index = 0
+    while index < len(merged):
+        current = merged[index]
+        current_start, current_end, _ = _subtitle_srt_sort_key(current)
+        duration = max(0.0, current_end - current_start)
+        current_text = _srt_item_text(current)
+        if duration >= min_duration_sec or not current_text:
+            index += 1
+            continue
+
+        left_index = index - 1 if index > 0 else None
+        right_index = index + 1 if index + 1 < len(merged) else None
+        left_item = merged[left_index] if left_index is not None else None
+        right_item = merged[right_index] if right_index is not None else None
+        left_allowed = (
+            left_item is not None
+            and _short_flash_merge_allowed(
+                left_item,
+                current,
+                max_gap_sec=max_gap_sec,
+                max_merged_chars=max_merged_chars,
+            )
+        )
+        right_allowed = (
+            right_item is not None
+            and _short_flash_merge_allowed(
+                current,
+                right_item,
+                max_gap_sec=max_gap_sec,
+                max_merged_chars=max_merged_chars,
+            )
+        )
+
+        if not left_allowed and not right_allowed:
+            index += 1
+            continue
+
+        if left_allowed and (
+            not right_allowed
+            or _short_flash_merge_gap(left_item, current) <= _short_flash_merge_gap(current, right_item)
+        ):
+            assert left_index is not None and left_item is not None
+            merged[left_index] = _merge_srt_cues(left_item, current)
+            merged.pop(index)
+            index = max(0, left_index)
+            continue
+
+        assert right_index is not None and right_item is not None
+        merged[index] = _merge_srt_cues(current, right_item)
+        merged.pop(right_index)
+
+    return merged
+
+
+def _short_flash_merge_gap(left: dict[str, Any] | None, right: dict[str, Any] | None) -> float:
+    if left is None or right is None:
+        return float("inf")
+    _, left_end, _ = _subtitle_srt_sort_key(left)
+    right_start, _, _ = _subtitle_srt_sort_key(right)
+    return max(0.0, right_start - left_end)
+
+
+def _short_flash_merge_allowed(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    max_gap_sec: float,
+    max_merged_chars: int,
+) -> bool:
+    if _short_flash_merge_gap(left, right) > max_gap_sec:
+        return False
+    left_text = _srt_item_text(left)
+    right_text = _srt_item_text(right)
+    if not left_text or not right_text:
+        return False
+    return len(_compact_srt_text(f"{left_text}{right_text}")) <= max_merged_chars
 
 
 def _srt_item_text(item: dict[str, Any]) -> str:

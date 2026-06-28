@@ -118,6 +118,8 @@ describe("manual editor timeline mapping", () => {
       subtitleReplacements: [{ original: "旧", replacement: "新", occurrence_count: 3 }],
       baseVideoTransform: { rotation_cw: 0, aspect_ratio: "source", resolution_mode: "source", resolution_preset: "1080p" },
       currentVideoTransform: { rotation_cw: 90, aspect_ratio: "9:16", resolution_mode: "specified", resolution_preset: "2160p" },
+      baseHyperframesOptions: { progress_bar: false },
+      currentHyperframesOptions: { progress_bar: false },
       hasVideoSummaryEdits: true,
     });
 
@@ -132,6 +134,30 @@ describe("manual editor timeline mapping", () => {
     ]);
     expect(changes[0].detail).toContain("输出时长变化 -0:01.00");
     expect(changes[4].detail).toBe("2 条（文本 1 / 时间 1 / 删除 1）");
+  });
+
+  it("summarizes segmented progress bar packaging changes", () => {
+    const changes = buildManualEditChangeList({
+      baseSegments: [{ start: 0, end: 10 }],
+      effectiveSegments: [{ start: 0, end: 10 }],
+      outputDurationDeltaSec: 0,
+      subtitleOverrides: [],
+      baseSubtitles: [],
+      subtitleReplacements: [],
+      baseVideoTransform: { rotation_cw: 0, aspect_ratio: "source", resolution_mode: "source", resolution_preset: "1080p" },
+      currentVideoTransform: { rotation_cw: 0, aspect_ratio: "source", resolution_mode: "source", resolution_preset: "1080p" },
+      baseHyperframesOptions: { progress_bar: false },
+      currentHyperframesOptions: { progress_bar: true },
+      hasVideoSummaryEdits: false,
+    });
+
+    expect(changes).toEqual([
+      expect.objectContaining({
+        title: "分段进度条",
+        detail: "关闭 -> 开启",
+        meta: "外挂包装",
+      }),
+    ]);
   });
 
   it("restores source ASR words over stale transcript drafts after refresh", () => {
@@ -347,6 +373,8 @@ describe("manual editor timeline mapping", () => {
       subtitleReplacements: [],
       baseVideoTransform: { rotation_cw: 0, aspect_ratio: "source", resolution_mode: "source", resolution_preset: "1080p" },
       currentVideoTransform: { rotation_cw: 0, aspect_ratio: "source", resolution_mode: "source", resolution_preset: "1080p" },
+      baseHyperframesOptions: { progress_bar: false },
+      currentHyperframesOptions: { progress_bar: false },
       hasVideoSummaryEdits: false,
     });
 

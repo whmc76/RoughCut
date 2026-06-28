@@ -188,14 +188,13 @@ async def plan_local_music_entry(
         allowed_rankings.sort(key=lambda item: (-float(item["score"]), float(item["enter_sec"])))
         rankings = allowed_rankings
     if not rankings:
-        fallback_sec = round(float(subtitle_items[0].get("end_time", 0.0) or 0.0), 2)
-        resolved["enter_sec"] = max(0.0, fallback_sec)
-        resolved["entry_reason"] = "缺少可靠停顿点，回退到第一句结束后进入背景音乐。"
+        resolved["enter_sec"] = 0.0
+        resolved["entry_reason"] = "缺少可靠停顿点，背景音乐从开头低音量进入。"
         resolved["timing_summary"] = _build_timing_summary(
             [],
             review_gap=float(settings.packaging_selection_review_gap),
             min_score=float(settings.packaging_selection_min_score),
-            low_confidence_reason="缺少可靠停顿点，建议确认 BGM 进入点。",
+            low_confidence_reason="缺少可靠停顿点，已回退为从开头进入，建议确认 BGM 进入点。",
         )
         return normalize_local_music_plan(resolved)
 

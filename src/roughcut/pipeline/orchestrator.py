@@ -122,6 +122,27 @@ _RENDER_EXECUTION_STEPS = {"render_plain_base", "render_packaging_candidates", "
 _GPU_SENSITIVE_STEPS = {"transcribe", "avatar_commentary", *_RENDER_EXECUTION_STEPS}
 _REVIEW_ROUND_STEPS = {"summary_review", "glossary_review"}
 _EDIT_PLAN_OPTIONAL_PREREQUISITES = {"avatar_commentary"}
+_EXPLICIT_STEP_PREREQUISITES: dict[str, tuple[str, ...]] = {
+    "probe": (),
+    "extract_audio": ("probe",),
+    "transcribe": ("extract_audio",),
+    "subtitle_postprocess": ("transcribe",),
+    "subtitle_term_resolution": ("subtitle_postprocess",),
+    "subtitle_consistency_review": ("subtitle_term_resolution",),
+    "glossary_review": ("subtitle_term_resolution",),
+    "transcript_review": ("subtitle_term_resolution",),
+    "content_profile": ("subtitle_consistency_review", "glossary_review", "transcript_review"),
+    "summary_review": ("content_profile",),
+    "edit_plan": ("content_profile",),
+    "chapter_analysis": ("edit_plan",),
+    "dialogue_polish": ("chapter_analysis",),
+    "subtitle_translation": ("dialogue_polish",),
+    "avatar_commentary": ("subtitle_translation",),
+    "render_plain_base": ("subtitle_translation", "edit_plan", "chapter_analysis", "dialogue_polish", "avatar_commentary"),
+    "render_packaging_candidates": ("render_plain_base",),
+    "render_burn_in": ("render_packaging_candidates",),
+    "render": ("render_burn_in",),
+}
 _EXTERNAL_SCRIPT_FOOTAGE_WORKFLOW_MODES = {"remix_auto_commentary", "remix_llm_plan", "script_footage_remix"}
 _STREAMLINED_ASR_REVIEW_STEPS = frozenset(
     {
@@ -1327,7 +1348,10 @@ async def _is_step_ready(step: JobStep, session) -> bool:
         return False
 
     step_idx = PIPELINE_STEPS.index(step.step_name)
-    if step_idx == 0:
+    prerequisites = _EXPLICIT_STEP_PREREQUISITES.get(step.step_name)
+    if prerequisites is None:
+        prerequisites = tuple(PIPELINE_STEPS[:step_idx])
+    if not prerequisites:
         return True  # First step is always ready
 
     existing_steps_result = await session.execute(
@@ -1337,7 +1361,7 @@ async def _is_step_ready(step: JobStep, session) -> bool:
         existing_step.step_name: existing_step
         for existing_step in existing_steps_result.scalars().all()
     }
-    for prerequisite_name in PIPELINE_STEPS[:step_idx]:
+    for prerequisite_name in prerequisites:
         if step.step_name == "edit_plan" and prerequisite_name in _EDIT_PLAN_OPTIONAL_PREREQUISITES:
             continue
         prerequisite = steps_by_name.get(prerequisite_name)

@@ -3,9 +3,15 @@ from types import SimpleNamespace
 
 from roughcut.api.jobs import (
     _attach_content_profile_capability_orchestration,
+    _build_job_source_context,
     _ensure_content_understanding_payload,
+    _extract_reference_frame,
+    _merge_smart_cut_capability_key,
+    _normalize_create_start_mode,
     _smart_cut_rule_reasons_from_capabilities,
+    _smart_cut_rules_payload_from_selected_reasons,
 )
+from roughcut.api import jobs as jobs_api_module
 from roughcut.api.schemas import ContentProfileReviewOut
 from roughcut.review.content_profile import _attach_content_understanding_timed_focus_spans, assess_content_profile_automation
 from roughcut.review.downstream_context import (
@@ -40,17 +46,100 @@ def test_content_profile_review_out_exposes_strategy_review_gates() -> None:
     assert payload.strategy_review_gates["review_gate_status"]["blocking_gate_ids"] == ["storyboard_review"]
 
 
+def test_queue_thumbnail_extraction_uses_visual_orientation_filter(monkeypatch, tmp_path) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        captured.append(cmd)
+        tmp_path.joinpath("profile_00.jpg").write_bytes(b"thumb")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(jobs_api_module, "_probe_duration", lambda _path: 12.0)
+    monkeypatch.setattr(jobs_api_module.subprocess, "run", fake_run)
+
+    assert _extract_reference_frame(
+        tmp_path / "source.mov",
+        tmp_path,
+        0,
+        3,
+        {"rotation_cw": 0, "source": "vision", "confidence": 0.9, "metadata_rotation_cw": 270},
+    )
+
+    cmd = captured[0]
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "-noautorotate" in cmd
+    assert vf == "sidedata=mode=delete:type=DISPLAYMATRIX,thumbnail=90,scale=960:-2"
+
+
 def test_smart_cut_rules_follow_speech_density_capability() -> None:
     assert _smart_cut_rule_reasons_from_capabilities(["filler_word"], ["speech_density_trim"]) == [
+        "filler_word",
+    ]
+    assert _smart_cut_rule_reasons_from_capabilities(
+        ["filler_word", "silence", "pause", "low_signal_subtitle"],
+        ["chapter_cards"],
+    ) == ["filler_word", "silence", "pause", "low_signal_subtitle"]
+
+
+def test_smart_cut_rules_default_only_when_no_explicit_rule_selection() -> None:
+    assert _smart_cut_rule_reasons_from_capabilities(None, ["speech_density_trim"]) == [
         "filler_word",
         "repeated_speech",
         "silence",
         "low_signal_subtitle",
     ]
-    assert _smart_cut_rule_reasons_from_capabilities(
-        ["filler_word", "silence", "pause", "low_signal_subtitle"],
-        ["chapter_cards"],
-    ) == []
+
+
+def test_smart_delete_payload_only_enables_selected_reasons() -> None:
+    payload = _smart_cut_rules_payload_from_selected_reasons(["low_signal_subtitle"])
+
+    assert payload["smartDeleteEnabled"] is True
+    assert "low_signal_subtitle" not in payload["disabledSmartDeleteReasons"]
+    assert "restart_retake" in payload["disabledSmartDeleteReasons"]
+    assert "gap_fill" in payload["disabledSmartDeleteReasons"]
+
+
+def test_smart_cut_capability_is_derived_from_explicit_rule_selection() -> None:
+    assert _merge_smart_cut_capability_key(["screen_focus"], ["filler_word"]) == [
+        "screen_focus",
+        "speech_density_trim",
+    ]
+    assert _merge_smart_cut_capability_key(["screen_focus", "speech_density_trim"], []) == ["screen_focus"]
+
+
+def test_create_start_mode_normalizes_manual_and_immediate() -> None:
+    assert _normalize_create_start_mode("manual") == "manual"
+    assert _normalize_create_start_mode("immediate") == "immediate"
+    assert _normalize_create_start_mode("bad-value") == "immediate"
+    assert _normalize_create_start_mode(None) == "immediate"
+
+
+def test_build_job_source_context_stores_translation_target_language() -> None:
+    assert "translation" not in _build_job_source_context(video_description=None)
+
+    assert _build_job_source_context(
+        video_description=None,
+        translation_target_language="auto",
+    )["translation"] == {"target_language_mode": "auto"}
+
+    assert _build_job_source_context(
+        video_description=None,
+        translation_target_language="ja-JP",
+    )["translation"] == {"target_language_mode": "manual", "target_language": "ja-JP"}
+
+
+def test_build_job_source_context_stores_auto_publication_material_intent() -> None:
+    assert "publication" not in _build_job_source_context(video_description=None)
+
+    source_context = _build_job_source_context(
+        video_description=None,
+        auto_generate_publication_materials=True,
+    )
+
+    assert source_context["publication"] == {
+        "auto_generate_materials": True,
+        "mode": "render_complete",
+    }
 
 
 def test_attach_content_understanding_timed_focus_spans_from_evidence_bundle() -> None:
@@ -465,7 +554,7 @@ def test_attach_content_profile_capability_orchestration_uses_create_task_rule_a
                             "pauseEnabled": False,
                             "smartDeleteEnabled": False,
                         },
-                        "material_enhancement_modes": ["voice_enhancement"],
+                        "material_enhancement_modes": ["auto_orientation_correction", "voice_enhancement"],
                         "capability_overrides": {
                             "screen_focus": "disabled",
                             "chapter_cards": "disabled",
@@ -489,7 +578,7 @@ def test_attach_content_profile_capability_orchestration_uses_create_task_rule_a
 
     assert payload is not None
     assert payload["smart_cut_rules"]["enabled_reasons"] == ["filler_word"]
-    assert payload["material_enhancement_modes"] == ["voice_enhancement"]
+    assert payload["material_enhancement_modes"] == ["auto_orientation_correction", "voice_enhancement"]
     orchestration = payload["capability_orchestration"]
     assert orchestration["capabilities"]["speech_density_trim"] == "auto_apply"
     assert orchestration["capabilities"]["screen_focus"] == "disabled"

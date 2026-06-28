@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 
+from roughcut.pipeline import orchestrator
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS
 from roughcut.pipeline.rerun_actions import QUALITY_RERUN_STEPS, rerun_chain_from_step
 from roughcut.pipeline import steps, tasks
@@ -89,6 +90,19 @@ def test_render_phases_have_durable_task_entrypoints() -> None:
     assert "render_plain_base" in step_runner_source
     assert "render_packaging_candidates" in step_runner_source
     assert "render_burn_in" in step_runner_source
+
+
+def test_review_steps_use_explicit_parallel_safe_prerequisites() -> None:
+    prereqs = orchestrator._EXPLICIT_STEP_PREREQUISITES
+
+    assert prereqs["subtitle_consistency_review"] == ("subtitle_term_resolution",)
+    assert prereqs["glossary_review"] == ("subtitle_term_resolution",)
+    assert prereqs["transcript_review"] == ("subtitle_term_resolution",)
+    assert prereqs["content_profile"] == (
+        "subtitle_consistency_review",
+        "glossary_review",
+        "transcript_review",
+    )
 
 
 def test_editing_render_flow_does_not_consume_publication_cover_hooks() -> None:

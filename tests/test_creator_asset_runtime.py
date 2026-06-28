@@ -4,7 +4,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from roughcut import creator_asset_runtime
-from roughcut.creator_asset_runtime import pick_creator_avatar_presenter_asset, resolve_creator_asset_path
+from roughcut.creator_asset_runtime import (
+    creator_has_complete_packaging_assets,
+    creator_packaging_asset_types,
+    pick_creator_avatar_presenter_asset,
+    resolve_creator_asset_path,
+)
 from roughcut.packaging import library as packaging_library
 from roughcut.pipeline import steps as pipeline_steps
 
@@ -50,6 +55,29 @@ def test_resolve_creator_asset_path_repairs_container_path(tmp_path: Path, monke
     )
 
     resolved = resolve_creator_asset_path("/app/data/output/_creator_assets/creator-1/asset.mp4")
+
+    assert resolved == asset_path.resolve()
+
+
+def test_resolve_creator_asset_path_repairs_windows_runtime_output_path_to_container_legacy_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_root = tmp_path / "app"
+    asset_path = project_root / "data" / "output" / "_creator_assets" / "creator-1" / "asset.mp4"
+    asset_path.parent.mkdir(parents=True, exist_ok=True)
+    asset_path.write_bytes(b"asset")
+    monkeypatch.setattr(creator_asset_runtime, "DEFAULT_PROJECT_ROOT", project_root)
+    monkeypatch.setattr(creator_asset_runtime, "DEFAULT_OUTPUT_ROOT", project_root / "data" / "runtime")
+    monkeypatch.setattr(
+        creator_asset_runtime,
+        "get_settings",
+        lambda: SimpleNamespace(output_dir=(project_root / "data" / "runtime" / "output").as_posix()),
+    )
+
+    resolved = resolve_creator_asset_path(
+        "C:/sample-workspace/RoughCut/data/runtime/output/_creator_assets/creator-1/asset.mp4"
+    )
 
     assert resolved == asset_path.resolve()
 
@@ -127,6 +155,96 @@ def test_resolve_creator_avatar_binding_uses_legacy_profile_bound_to_creator(mon
     assert binding["presenter_id"] == presenter.as_posix()
 
 
+def test_resolve_avatar_presenter_binding_uses_configured_presenter_without_creator(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    presenter = tmp_path / "configured-presenter.mp4"
+    presenter.write_bytes(b"video")
+    monkeypatch.setattr(
+        pipeline_steps,
+        "get_settings",
+        lambda: SimpleNamespace(avatar_presenter_id=presenter.as_posix()),
+    )
+    monkeypatch.setattr(pipeline_steps, "list_avatar_material_profiles", lambda: [])
+
+    binding = pipeline_steps._resolve_avatar_presenter_binding(None)
+
+    assert binding is not None
+    assert binding["source"] == "settings_avatar_presenter_id"
+    assert binding["presenter_id"] == presenter.as_posix()
+
+
+def test_resolve_avatar_presenter_binding_uses_single_ready_avatar_profile(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    presenter = tmp_path / "ready-profile-presenter.mp4"
+    presenter.write_bytes(b"video")
+    monkeypatch.setattr(
+        pipeline_steps,
+        "get_settings",
+        lambda: SimpleNamespace(avatar_presenter_id=""),
+    )
+    monkeypatch.setattr(
+        pipeline_steps,
+        "list_avatar_material_profiles",
+        lambda: [
+            {
+                "id": "profile-1",
+                "display_name": "Ready Presenter",
+                "presenter_alias": "Ready",
+                "created_at": "2026-06-14T10:00:00+08:00",
+                "capability_status": {"preview": "ready", "avatar_generation": "ready"},
+                "files": [{"role": "speaking_video", "path": presenter.as_posix()}],
+            }
+        ],
+    )
+
+    binding = pipeline_steps._resolve_avatar_presenter_binding(None)
+
+    assert binding is not None
+    assert binding["source"] == "default_avatar_profile"
+    assert binding["avatar_profile_id"] == "profile-1"
+    assert binding["presenter_id"] == presenter.as_posix()
+
+
+def test_resolve_avatar_presenter_binding_prefers_creator_asset_over_default(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    creator_presenter = tmp_path / "creator-presenter.mp4"
+    creator_presenter.write_bytes(b"creator")
+    default_presenter = tmp_path / "default-presenter.mp4"
+    default_presenter.write_bytes(b"default")
+    creator = SimpleNamespace(
+        id="creator-1",
+        name="Creator One",
+        assets=[
+            SimpleNamespace(
+                id="asset-1",
+                asset_type="digital_human_closeup",
+                stored_path=creator_presenter.as_posix(),
+                metadata_json={"content_type": "video/mp4"},
+                created_at="2026-06-14T10:00:00+08:00",
+            )
+        ],
+        preferences=[],
+    )
+    monkeypatch.setattr(
+        pipeline_steps,
+        "get_settings",
+        lambda: SimpleNamespace(avatar_presenter_id=default_presenter.as_posix()),
+    )
+    monkeypatch.setattr(pipeline_steps, "list_avatar_material_profiles", lambda: [])
+
+    binding = pipeline_steps._resolve_avatar_presenter_binding(creator)
+
+    assert binding is not None
+    assert binding["source"] == "creator_asset"
+    assert binding["presenter_id"] == creator_presenter.as_posix()
+
+
 def test_missing_creator_avatar_binding_is_skipped_not_degraded() -> None:
     plan = {
         "mode": "full_track_audio_passthrough",
@@ -168,6 +286,8 @@ def test_resolve_packaging_plan_for_job_prefers_creator_assets(monkeypatch, tmp_
     logo.write_bytes(b"logo")
     music = tmp_path / "music.mp3"
     music.write_bytes(b"music")
+    music_b = tmp_path / "music-b.mp3"
+    music_b.write_bytes(b"music-b")
 
     monkeypatch.setattr(packaging_library, "_load_state", lambda: {"config": {}, "assets": []})
     monkeypatch.setattr(packaging_library, "_load_job_packaging_snapshot", lambda _job_id: None)
@@ -208,13 +328,42 @@ def test_resolve_packaging_plan_for_job_prefers_creator_assets(monkeypatch, tmp_
                 "metadata_json": {"content_type": "audio/mpeg"},
                 "created_at": "2026-06-14T10:03:00+08:00",
             },
+            {
+                "id": "music-2",
+                "asset_type": "music_library",
+                "original_name": "music-b.mp3",
+                "stored_path": music_b.as_posix(),
+                "metadata_json": {"content_type": "audio/mpeg"},
+                "created_at": "2026-06-14T10:04:00+08:00",
+            },
         ],
     )
 
     assert plan["intro"]["path"] == intro.as_posix()
     assert plan["outro"]["path"] == outro.as_posix()
     assert plan["watermark"]["path"] == logo.as_posix()
-    assert plan["music"]["path"] == music.as_posix()
+    assert plan["music"]["path"] in {music.as_posix(), music_b.as_posix()}
+    assert set(plan["music"]["candidate_paths"]) == {music.as_posix(), music_b.as_posix()}
+
+
+def test_creator_packaging_asset_types_require_existing_intro_music_and_logo(tmp_path: Path) -> None:
+    intro = tmp_path / "intro.mp4"
+    intro.write_bytes(b"intro")
+    music = tmp_path / "music.mp3"
+    music.write_bytes(b"music")
+    logo = tmp_path / "logo.png"
+    logo.write_bytes(b"logo")
+
+    assets = [
+        SimpleNamespace(asset_type="intro", stored_path=intro),
+        SimpleNamespace(asset_type="music_library", stored_path=music),
+        SimpleNamespace(asset_type="logo", stored_path=logo),
+        SimpleNamespace(asset_type="outro", stored_path=tmp_path / "missing-outro.mp4"),
+    ]
+
+    assert creator_packaging_asset_types(assets) == {"intro", "music", "watermark"}
+    assert creator_has_complete_packaging_assets(assets) is True
+    assert creator_has_complete_packaging_assets(assets[:2]) is False
 
 
 def test_packaging_creator_card_inference_requires_same_source_logo(tmp_path: Path) -> None:

@@ -90,6 +90,7 @@ from roughcut.review.content_profile import (
 from roughcut.publication_platform_matrix import (
     evaluate_platform_schedule_window,
     normalize_publication_platform_name,
+    platform_content_contract,
     platform_default_declaration,
     platform_manual_handoff_only,
     platform_manual_publish_entry_url,
@@ -333,10 +334,10 @@ PLATFORM_PUBLISH_RULES: dict[str, dict[str, Any]] = {
     },
     "kuaishou": {
         "label": "快手",
-        "body_label": "简介",
-        "tag_label": "标签",
+        "body_label": "作品描述",
+        "tag_label": "嵌入作品描述的话题",
         "has_title": False,
-        "title_limit": 26,
+        "title_limit": 0,
         "body_limit": 300,
         "tag_limit": 4,
         "tag_style": "hashtags_space",
@@ -402,6 +403,27 @@ PLATFORM_PUBLISH_RULES: dict[str, dict[str, Any]] = {
         "rule_note": "无独立标题，正文要在 280 字内，hashtags 建议克制；默认不强调独立 16:9 封面。",
     },
 }
+
+
+def _apply_platform_content_contracts_to_publish_rules() -> None:
+    for platform_key, rules in PLATFORM_PUBLISH_RULES.items():
+        matrix_key = platform_key.replace("_", "-")
+        contract = platform_content_contract(matrix_key)
+        if not contract:
+            continue
+        rules["has_title"] = bool(contract.get("has_title"))
+        rules["title_label"] = str(contract.get("title_label") or ("标题" if rules["has_title"] else "")).strip()
+        rules["body_label"] = str(contract.get("body_label") or rules.get("body_label") or "正文").strip()
+        rules["tag_label"] = str(contract.get("tag_label") or rules.get("tag_label") or "").strip()
+        rules["title_limit"] = int(contract.get("title_limit") or 0)
+        rules["body_limit"] = int(contract.get("body_limit") or rules.get("body_limit") or 0)
+        rules["tag_limit"] = int(contract.get("tag_limit") or 0)
+        rules["tag_style"] = str(contract.get("tag_style") or rules.get("tag_style") or "").strip()
+        rules["separate_tags"] = bool(contract.get("separate_tags"))
+        rules["tags_embedded_in_body"] = bool(contract.get("tags_embedded_in_body"))
+
+
+_apply_platform_content_contracts_to_publish_rules()
 
 
 def _normalize_external_publish_platform_key(value: Any) -> str:
@@ -710,6 +732,7 @@ async def generate_intelligent_copy(
     copy_style: str | None = None,
     platforms: list[str] | None = None,
     use_existing_cover: bool = False,
+    force_regenerate: bool = False,
     creator_profile_id: str | None = None,
     creator_profile_name: str | None = None,
     creator_profile: dict[str, Any] | None = None,
@@ -756,7 +779,11 @@ async def generate_intelligent_copy(
         platform_keys=selected_platform_keys,
         fallback_result=existing_result,
     )
-    reusable_materials = _collect_reusable_platform_materials(existing_result, platform_keys=selected_platform_keys)
+    reusable_materials = (
+        {}
+        if force_regenerate
+        else _collect_reusable_platform_materials(existing_result, platform_keys=selected_platform_keys)
+    )
     platforms_requiring_regeneration = [key for key in selected_platform_keys if key not in reusable_materials]
     await _emit_intelligent_copy_progress(
         progress_callback,
@@ -944,6 +971,7 @@ async def generate_intelligent_copy(
         "cover_reference_paths": [str(path) for path in cover_reference_paths],
         "cover_source_manifest": cover_source_manifest,
         "use_existing_cover": bool(use_existing_cover),
+        "force_regenerate": bool(force_regenerate),
         "cover_brief": cover_brief,
         "copy_style": resolved_copy_style,
         "inspection": inspection,
@@ -995,6 +1023,7 @@ async def generate_intelligent_copy(
         title=cover_group_title,
         cover_brief=cover_brief,
         use_existing_cover=use_existing_cover,
+        force_regenerate=force_regenerate,
     )
     publish_platforms = [item for item in PLATFORM_ORDER if item[0] in selected_platform_keys and PLATFORM_PUBLISH_RULES.get(item[0])]
     for index, (platform_key, _label, _body_label, _tag_label) in enumerate(publish_platforms, start=1):
@@ -1032,6 +1061,7 @@ async def generate_intelligent_copy(
                 platform_key=platform_key,
                 platform_rules=rules,
                 cover_group=cover_group,
+                force_regenerate=force_regenerate,
             )
         else:
             cover_generation = await _render_or_reuse_platform_cover_group(
@@ -1047,6 +1077,7 @@ async def generate_intelligent_copy(
                 platform_key=platform_key,
                 platform_rules=rules,
                 cover_group=cover_group,
+                force_regenerate=force_regenerate,
             )
         platform_blocks = _collect_platform_material_blocking_reasons(
             {**material, "cover_generation": cover_generation} if cover_generation else material
@@ -1666,6 +1697,7 @@ async def refresh_existing_intelligent_copy_cover_current_state(
     all_platform_keys: list[str] = list(context["all_platform_keys"] or [])
     packaging: dict[str, Any] = context["packaging"]
     cover_source = context["cover_source"]
+    cover_reference_paths = list(context.get("cover_reference_paths") or [])
     cover_brief: dict[str, Any] = context["cover_brief"]
     cover_source_manifest = context["cover_source_manifest"]
     readiness_blocking_reasons = intelligent_copy_material_context_fallback_reasons(
@@ -3041,7 +3073,7 @@ async def _revalidate_existing_cover_generation_request(
         cover_brief=cover_brief,
         source_kind="image_generation",
         image_generation=image_generation,
-        allow_overlay=False,
+        allow_overlay=True,
     )
     if isinstance(verification_payload, dict):
         request_payload = verification_payload
@@ -3172,9 +3204,11 @@ def _material_to_result_payload(material: dict[str, Any]) -> dict[str, Any]:
         "key": _normalize_external_publish_platform_key(material.get("key")),
         "label": str(material.get("label") or "").strip(),
         "has_title": bool(material.get("has_title", True)),
-        "title_label": str(material.get("title_label") or "标题").strip() or "标题",
+        "title_label": str(material.get("title_label") or ("标题" if material.get("has_title", True) else "")).strip(),
         "body_label": str(material.get("body_label") or "正文").strip() or "正文",
         "tag_label": str(material.get("tag_label") or "标签").strip() or "标签",
+        "separate_tags": bool(material.get("separate_tags", True)),
+        "tags_embedded_in_body": bool(material.get("tags_embedded_in_body", False)),
         "constraints": dict(material.get("constraints") or {}) if isinstance(material.get("constraints"), dict) else {},
         "titles": list(material.get("titles") or []),
         "title_goals": list(material.get("title_goals") or []),
@@ -3404,8 +3438,6 @@ def _supplement_existing_packaging_from_material_files(
     )
     changed = False
     for platform_key in platform_keys:
-        if platforms.get(platform_key):
-            continue
         synthesized = _load_existing_platform_packaging_from_material_files(
             material_dir=material_dir,
             platform_key=platform_key,
@@ -3413,7 +3445,10 @@ def _supplement_existing_packaging_from_material_files(
         )
         if not isinstance(synthesized, dict):
             continue
-        platforms[platform_key] = synthesized
+        platforms[platform_key] = {
+            **dict(platforms.get(platform_key) or {}),
+            **synthesized,
+        }
         changed = True
     if not platforms and not changed:
         return normalized
@@ -3612,9 +3647,11 @@ def _normalize_existing_platform_material(item: dict[str, Any], *, rules: dict[s
         "key": _normalize_internal_publish_platform_key(item.get("key")),
         "label": str(item.get("label") or rules.get("label") or "").strip(),
         "has_title": bool(item.get("has_title", rules.get("has_title", True))),
-        "title_label": str(item.get("title_label") or "标题").strip() or "标题",
+        "title_label": str(item.get("title_label") or rules.get("title_label") or ("标题" if rules.get("has_title", True) else "")).strip(),
         "body_label": str(item.get("body_label") or rules.get("body_label") or "正文").strip(),
         "tag_label": str(item.get("tag_label") or rules.get("tag_label") or "标签").strip(),
+        "separate_tags": bool(item.get("separate_tags", rules.get("separate_tags", True))),
+        "tags_embedded_in_body": bool(item.get("tags_embedded_in_body", rules.get("tags_embedded_in_body", False))),
         "constraints": {
             "title_limit": int(rules.get("title_limit") or 0),
             "body_limit": int(rules.get("body_limit") or 0),
@@ -3652,13 +3689,44 @@ def _restore_or_build_platform_material(
     existing_item: dict[str, Any] | None,
     packaging_platforms: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    if isinstance(existing_item, dict):
-        return _normalize_existing_platform_material(existing_item, rules=rules)
     platform_payload = (
         packaging_platforms.get(platform_key)
         if isinstance(packaging_platforms, dict) and isinstance(packaging_platforms.get(platform_key), dict)
         else None
     )
+    if isinstance(existing_item, dict):
+        material = _normalize_existing_platform_material(existing_item, rules=rules)
+        if isinstance(platform_payload, dict):
+            copy_material = platform_payload.get("copy_material") if isinstance(platform_payload.get("copy_material"), dict) else {}
+            if str(copy_material.get("source") or "").strip() == "materialized_copy_files_restore":
+                restored = _build_platform_material(
+                    platform_key=platform_key,
+                    platform_payload=platform_payload,
+                    rules=rules,
+                )
+                _copy_material_contract_publication_context(source=platform_payload, destination=restored)
+                for key in (
+                    "titles",
+                    "title_goals",
+                    "primary_title",
+                    "title_copy_all",
+                    "body",
+                    "tags",
+                    "tags_copy",
+                    "full_copy",
+                    "copy_material",
+                ):
+                    value = restored.get(key)
+                    if isinstance(value, list):
+                        if value:
+                            material[key] = list(value)
+                    elif isinstance(value, dict):
+                        if value:
+                            material[key] = dict(value)
+                    elif str(value or "").strip():
+                        material[key] = value
+                _copy_material_contract_publication_context(source=platform_payload, destination=material)
+        return material
     if not isinstance(platform_payload, dict):
         return None
     material = _build_platform_material(
@@ -3714,12 +3782,19 @@ def _build_platform_material(*, platform_key: str, platform_payload: dict[str, A
     tags = [str(item).strip().lstrip("#") for item in (platform_payload.get("tags") or []) if str(item).strip()]
     tags = _dedupe(tags)[: int(rules["tag_limit"])]
     tags_copy = _format_tag_copy(tags, style=str(rules["tag_style"]))
+    tags_embedded_in_body = bool(rules.get("tags_embedded_in_body"))
+    separate_tags = bool(rules.get("separate_tags", True))
+    if tags_embedded_in_body and body and tags_copy:
+        body_has_tag = any(f"#{tag}" in body or tag in body for tag in tags)
+        if not body_has_tag:
+            embedded_body = f"{body}\n{tags_copy}".strip()
+            body = _trim_to_display_units(embedded_body, int(rules["body_limit"]))
     full_copy_parts = []
     if titles:
         full_copy_parts.append(titles[0])
     if body:
         full_copy_parts.append(body)
-    if tags_copy:
+    if tags_copy and separate_tags and not tags_embedded_in_body:
         full_copy_parts.append(tags_copy)
     collection = platform_payload.get("collection") if isinstance(platform_payload.get("collection"), dict) else None
     collection_name = str(platform_payload.get("collection_name") or "").strip()
@@ -3737,9 +3812,11 @@ def _build_platform_material(*, platform_key: str, platform_payload: dict[str, A
         "key": platform_key,
         "label": str(rules["label"]),
         "has_title": bool(rules.get("has_title", True)),
-        "title_label": "标题",
+        "title_label": str(rules.get("title_label") or ("标题" if rules.get("has_title", True) else "")),
         "body_label": str(rules["body_label"]),
         "tag_label": str(rules["tag_label"]),
+        "separate_tags": separate_tags,
+        "tags_embedded_in_body": tags_embedded_in_body,
         "constraints": {
             "title_limit": int(rules["title_limit"]),
             "body_limit": int(rules["body_limit"]),
@@ -4929,6 +5006,7 @@ async def _prime_standard_cover_matrix_groups(
     title: str,
     cover_brief: dict[str, Any] | None,
     use_existing_cover: bool,
+    force_regenerate: bool = False,
 ) -> dict[str, dict[str, Any]]:
     for group in _resolve_standard_cover_matrix_groups():
         group_key = str(group.get("key") or "").strip()
@@ -4975,6 +5053,7 @@ async def _prime_standard_cover_matrix_groups(
                 cover_brief=cover_brief,
                 platform_key=representative_platform,
                 rules=representative_rules,
+                force_regenerate=force_regenerate,
             )
         group_metadata["cover_group"] = {
             "key": group_key,
@@ -5043,10 +5122,14 @@ async def _render_or_reuse_platform_cover_group(
     platform_rules: dict[str, Any],
     cover_group: dict[str, Any],
     cover_brief: dict[str, Any] | None = None,
+    force_regenerate: bool = False,
 ) -> dict[str, Any]:
     group_key = str(cover_group.get("key") or platform_key).strip()
     group_output_path = smart_copy_cover_group_output_path(material_dir, group_key)
     group_metadata = cache.get(group_key)
+    if force_regenerate:
+        group_metadata = None
+        cache.pop(group_key, None)
     if group_metadata is None:
         group_rules = dict(platform_rules)
         group_rules["label"] = str(cover_group.get("label") or platform_rules.get("label") or platform_key)
@@ -5064,6 +5147,7 @@ async def _render_or_reuse_platform_cover_group(
             cover_brief=cover_brief,
             platform_key=str(cover_group.get("representative_platform") or platform_key),
             rules=group_rules,
+            force_regenerate=force_regenerate,
         )
         group_metadata["cover_group"] = {
             "key": group_key,
@@ -5092,10 +5176,14 @@ def _render_or_reuse_existing_cover_group(
     platform_key: str,
     platform_rules: dict[str, Any],
     cover_group: dict[str, Any],
+    force_regenerate: bool = False,
 ) -> dict[str, Any]:
     group_key = str(cover_group.get("key") or platform_key).strip()
     group_output_path = material_dir / f"00-cover-{group_key}.jpg"
     group_metadata = cache.get(group_key)
+    if force_regenerate:
+        group_metadata = None
+        cache.pop(group_key, None)
     if group_metadata is None:
         group_output_path.parent.mkdir(parents=True, exist_ok=True)
         target_width, target_height = tuple(cover_group.get("cover_size") or platform_rules["cover_size"])
@@ -5265,9 +5353,10 @@ def _collect_platform_material_blocking_reasons(material: dict[str, Any]) -> lis
         existing_reasons = [str(item).strip() for item in (cover_generation.get("blocking_reasons") or []) if str(item).strip()]
         if pending_reason not in existing_reasons:
             cover_generation["blocking_reasons"] = [*existing_reasons, pending_reason]
+    cover_generation_publish_ready = bool(cover_generation.get("publish_ready", False))
     if cover_generation and not bool(cover_generation.get("publish_ready", True)):
         problems.extend(str(item).strip() for item in (cover_generation.get("blocking_reasons") or []) if str(item).strip())
-    if cover_generation and not _cover_generation_is_codex_generated(cover_generation):
+    if cover_generation and not cover_generation_publish_ready and not _cover_generation_is_codex_generated(cover_generation):
         problems.append("封面必须由 Codex 生成，禁止本地合成或非 Codex 后端")
     return sorted(set(reason for reason in problems if reason))
 
@@ -5286,10 +5375,18 @@ def _collect_platform_material_generation_blocking_reasons(material: dict[str, A
     if cover_policy_required:
         if cover_source == "reference_cover_fallback":
             problems.append("封面禁止使用参考帧 fallback，必须完成高质量生图")
-        if cover_generation and not _cover_generation_is_codex_generated(cover_generation):
+        cover_generation_publish_ready = bool(cover_generation.get("publish_ready", False))
+        if cover_generation and not cover_generation_publish_ready and not _cover_generation_is_codex_generated(cover_generation):
             problems.append("封面必须由 Codex 生成，禁止本地合成或非 Codex 后端")
         if cover_generation and not bool(cover_generation.get("publish_ready", True)):
-            problems.extend(str(item).strip() for item in (cover_generation.get("blocking_reasons") or []) if str(item).strip())
+            problems.extend(
+                reason
+                for reason in (
+                    str(item).strip()
+                    for item in (cover_generation.get("blocking_reasons") or [])
+                )
+                if reason and not _is_publish_gate_only_cover_blocking_reason(reason)
+            )
         if image_generation and generation_status != "completed":
             problems.append(f"封面高质量生图未完成：status={generation_status or 'unknown'}")
     if cover_policy_required and image_generation:
@@ -5298,6 +5395,23 @@ def _collect_platform_material_generation_blocking_reasons(material: dict[str, A
         elif generation_status in {"failed", "error", "cancelled", "canceled"}:
             problems.append(f"封面生成失败：status={generation_status}")
     return sorted(set(reason for reason in problems if reason))
+
+
+def _is_publish_gate_only_cover_blocking_reason(reason: str) -> bool:
+    text = str(reason or "").strip()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "封面位图标题校验",
+            "完整封面位图标题校验",
+            "封面主标题未稳定锁定",
+            "内容签名漂移",
+            "最终封面",
+            "不能放行到最终封面",
+        )
+    )
 
 
 def _effective_cover_image_generation_metadata(cover_generation: dict[str, Any]) -> dict[str, Any]:
@@ -7789,6 +7903,7 @@ async def _render_platform_cover(
     platform_key: str,
     rules: dict[str, Any],
     cover_brief: dict[str, Any] | None = None,
+    force_regenerate: bool = False,
 ) -> dict[str, Any]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     target_width, target_height = int(rules["cover_size"][0]), int(rules["cover_size"][1])
@@ -7825,6 +7940,8 @@ async def _render_platform_cover(
     expected_director_policy = prompt_spec.get("director_policy") or {}
     completed_request_payload = _read_cover_request_payload(request_path)
     if (
+        not force_regenerate
+        and
         str(completed_request_payload.get("status") or "").strip().lower() == "completed"
         and output_path.exists()
         and (
@@ -7880,6 +7997,7 @@ async def _render_platform_cover(
                 title=title,
                 rules=rules,
                 cover_brief=cover_brief,
+                title_lines=expected_title_lines,
             )
             completed_request_payload["post_title_overlay_applied"] = True
             completed_request_payload["post_title_overlay_lines"] = dict(expected_title_lines or {})
@@ -8103,6 +8221,7 @@ async def _render_platform_cover(
                 title=title,
                 rules=rules,
                 cover_brief=cover_brief,
+                title_lines=expected_title_lines,
             )
             if isinstance(request_payload, dict):
                 request_payload["post_title_overlay_applied"] = True
@@ -8123,12 +8242,27 @@ async def _render_platform_cover(
             )
             cover_quality = cover_assessment
             if not bool(cover_assessment.get("publish_ready")):
+                assessment_blocking_reasons = list(cover_assessment.get("blocking_reasons") or [])
+                if (
+                    source_kind == "reference_cover_fallback"
+                    and isinstance(image_generation, dict)
+                    and str(image_generation.get("status") or "").strip().lower() == "pending_codex_imagegen"
+                ):
+                    assessment_blocking_reasons = [
+                        "封面等待 Codex 内置 imagegen 执行完成，当前仅生成了参考帧占位封面",
+                        *[
+                            reason
+                            for reason in assessment_blocking_reasons
+                            if str(reason).strip()
+                            != "封面等待 Codex 内置 imagegen 执行完成，当前仅生成了参考帧占位封面"
+                        ],
+                    ]
                 return {
                     "source": source_kind,
                     "platform": str(platform_key or "").strip(),
                     "target_size": {"width": target_width, "height": target_height},
                     "publish_ready": False,
-                    "blocking_reasons": list(cover_assessment.get("blocking_reasons") or []),
+                    "blocking_reasons": assessment_blocking_reasons,
                     "warnings": list(cover_assessment.get("warnings") or []),
                     "image_generation": image_generation,
                     "cover_quality": cover_assessment,
@@ -8159,14 +8293,15 @@ async def _apply_platform_cover_title_overlay(
     title: str,
     rules: dict[str, Any],
     cover_brief: dict[str, Any] | None = None,
+    title_lines: dict[str, str] | None = None,
 ) -> None:
-    title_lines = _build_cover_title_layout_plan(title=title, cover_brief=cover_brief)
-    if not title_lines or not output_path.exists():
+    resolved_title_lines = dict(title_lines or {}) or _build_cover_title_layout_plan(title=title, cover_brief=cover_brief)
+    if not resolved_title_lines or not output_path.exists():
         return
     cover_style, title_style = _resolve_overlay_title_style(rules=rules, cover_brief=cover_brief)
     await _overlay_title_layout(
         output_path,
-        title_lines,
+        resolved_title_lines,
         cover_style,
         title_style,
     )
@@ -8553,7 +8688,11 @@ def _finalize_cover_request_generation_status(*, request_path: Path, payload: di
         return
     image_generation = payload.get("image_generation") if isinstance(payload.get("image_generation"), dict) else {}
     backend = str(payload.get("backend") or image_generation.get("backend") or "").strip().lower()
-    if backend == "codex_builtin" and not _cover_request_has_generation_completion_evidence(payload):
+    if (
+        backend == "codex_builtin"
+        and not _cover_request_has_generation_completion_evidence(payload)
+        and not bool(payload.get("post_title_overlay_applied"))
+    ):
         return
     output_path = _resolve_cover_request_status_output_path(request_path=request_path, payload=payload)
     if output_path is None:
@@ -8954,6 +9093,7 @@ async def _ensure_generated_cover_title_contract_ready(
             title=title,
             rules=rules,
             cover_brief=cover_brief,
+            title_lines=title_lines,
         )
         if request_path.exists():
             _mark_cover_title_overlay_applied(

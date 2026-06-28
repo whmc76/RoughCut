@@ -1625,9 +1625,18 @@ function Update-LocalServiceEnv {
         [bool]$IndexTtsEnabled = $false
     )
 
+    $envHeygemRoot = Get-LocalDotEnvValue -Key "HEYGEM_SHARED_ROOT"
+    if ([string]::IsNullOrWhiteSpace($envHeygemRoot)) {
+        $envHeygemRoot = Get-LocalDotEnvValue -Key "HEYGEM_SHARED_HOST_DIR"
+    }
+    if ([string]::IsNullOrWhiteSpace($envHeygemRoot)) {
+        $envHeygemRoot = Get-LocalDotEnvValue -Key "HEYGEM_DATA_DIR"
+    }
     $defaultHeygemRoot = "C:/sample-data/heygem-shared"
     $heygemSharedRoot = if ($env:HEYGEM_SHARED_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_SHARED_ROOT)) {
         [System.IO.Path]::GetFullPath($env:HEYGEM_SHARED_ROOT).Replace('\\', '/')
+    } elseif (-not [string]::IsNullOrWhiteSpace($envHeygemRoot)) {
+        [System.IO.Path]::GetFullPath($envHeygemRoot).Replace('\\', '/')
     } else {
         $defaultHeygemRoot
     }
@@ -1647,10 +1656,13 @@ function Update-LocalServiceEnv {
     }
     $env:HEYGEM_SHARED_HOST_DIR = $heygemSharedRoot
     $env:HEYGEM_SHARED_ROOT = $heygemSharedRoot
+    $envHeygemVoiceRoot = Get-LocalDotEnvValue -Key "HEYGEM_VOICE_ROOT"
     $voiceRoot = if ($env:HEYGEM_VOICE_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_VOICE_ROOT)) {
         [System.IO.Path]::GetFullPath($env:HEYGEM_VOICE_ROOT).Replace('\\', '/')
+    } elseif (-not [string]::IsNullOrWhiteSpace($envHeygemVoiceRoot)) {
+        [System.IO.Path]::GetFullPath($envHeygemVoiceRoot).Replace('\\', '/')
     } else {
-        "C:/sample-data/heygem-shared/voice/data"
+        "$heygemSharedRoot/voice/data"
     }
     if (-not (Test-Path $voiceRoot)) {
         New-Item -ItemType Directory -Force -Path $voiceRoot | Out-Null
