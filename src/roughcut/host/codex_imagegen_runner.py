@@ -128,29 +128,29 @@ def _build_codex_imagegen_prompt(
     multi_angle_policy = ""
     if int(reference_count or 0) > 1 or bool(contract.get("same_product_multi_angle")):
         multi_angle_policy = (
-            "All attached images show the same real product or the same real comparison pair from different angles, not different products.\n"
+            "All attached images show the same real product or the same real comparison pair from different angles.\n"
             "Treat image 1 as the preferred hero-angle anchor.\n"
             "Infer the final composition from the majority hero view across the pack: if most references show a front view, three-quarter front view, or fuller hero angle, keep that as the final dominant view.\n"
-            "Use minority side-profile, edge-on, or detail-only references only to preserve structure and surface details; do not let them replace the dominant front/hero composition.\n"
+            "Use minority side-profile, edge-on, or detail-only references only to preserve structure and surface details while the dominant front/hero composition stays primary.\n"
         )
     return (
         f"{reference_line}\n"
         f"{multi_angle_policy}"
         "Use Codex built-in image_gen or image editing capabilities to create exactly one final bitmap cover.\n"
-        "Do not use any external image APIs.\n"
-        "Do not inspect the repository or run unrelated shell commands.\n"
+        "Use only the built-in image generation capability for this request.\n"
+        "Stay within this image generation request and its attached reference files.\n"
         "Follow this cover brief exactly:\n\n"
         f"{brief}\n\n"
         "Requirements:\n"
         "- Keep the product identity consistent with the reference.\n"
         "- When multiple reference images are attached, combine them to preserve the same real product identity and cross-angle consistency.\n"
-        "- Do not reinterpret a minority side-view reference as the main front view of the final cover.\n"
-        "- The bitmap itself must be the final publishable cover, not a text-free base image.\n"
+        "- Use the reference set to keep the final cover anchored on the intended hero view.\n"
+        "- The bitmap itself must be the final publishable cover with requested title text integrated.\n"
         "- Render the requested brand line, main title, subtitle, and hook text directly in the bitmap when the brief asks for them.\n"
-        "- Do not add any extra subtitles, slogans, logos, watermarks, or pseudo text beyond what the brief explicitly requests.\n"
-        "- Keep the subject readable after typography placement; do not let title effects cover the main product details.\n"
+        "- Keep readable visual text limited to the brief's requested brand line, main title, subtitle, and hook text.\n"
+        "- Keep the subject readable after typography placement, with main product details visible.\n"
         f"- The final bitmap must be written exactly to this path before you finish: {output_path}\n"
-        "- If you need to fall back to direct bitmap rendering in code, save the final image to that exact output path, not a different filename.\n"
+        "- If direct bitmap rendering in code is needed, save the final image to that exact output path.\n"
         "- After generating the best final bitmap, stop.\n"
         '- Final response JSON only: {"status":"completed","notes":"short summary"}\n'
     )

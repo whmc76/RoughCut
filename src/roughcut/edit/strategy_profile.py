@@ -87,6 +87,8 @@ _STRATEGY_POLICY_REGISTRY: dict[str, dict[str, Any]] = {
         },
         "capability_defaults": {
             "speech_density_trim": "auto_apply",
+            "source_media_inspection": "auto_apply",
+            "delivery_quality_governance": "auto_apply",
         },
     },
     "step_demonstration": {
@@ -112,8 +114,10 @@ _STRATEGY_POLICY_REGISTRY: dict[str, dict[str, Any]] = {
         },
         "capability_defaults": {
             "speech_density_trim": "auto_apply",
+            "source_media_inspection": "auto_apply",
             "screen_focus": "auto_apply",
             "chapter_cards": "suggest",
+            "delivery_quality_governance": "auto_apply",
         },
     },
     "experience_and_mood": {
@@ -138,8 +142,12 @@ _STRATEGY_POLICY_REGISTRY: dict[str, dict[str, Any]] = {
             "check_music_cue_balance": True,
         },
         "capability_defaults": {
+            "reference_style_analysis": "suggest",
+            "source_media_inspection": "auto_apply",
             "speech_density_trim": "suggest",
+            "soundtrack_audio_mix": "suggest",
             "local_audio_cues": "suggest",
+            "delivery_quality_governance": "auto_apply",
         },
     },
     "event_highlight": {
@@ -164,8 +172,12 @@ _STRATEGY_POLICY_REGISTRY: dict[str, dict[str, Any]] = {
             "check_cut_boundaries": True,
         },
         "capability_defaults": {
+            "reference_style_analysis": "suggest",
+            "source_media_inspection": "auto_apply",
             "highlight_window_selection": "suggest",
+            "soundtrack_audio_mix": "suggest",
             "local_audio_cues": "suggest",
+            "delivery_quality_governance": "auto_apply",
         },
     },
     "narrative_assembly": {
@@ -190,9 +202,16 @@ _STRATEGY_POLICY_REGISTRY: dict[str, dict[str, Any]] = {
             "check_overlay_subtitle_occlusion": True,
         },
         "capability_defaults": {
+            "reference_style_analysis": "suggest",
+            "source_media_inspection": "auto_apply",
+            "stock_footage_retrieval": "suggest",
+            "generative_scene_plan": "suggest",
             "local_broll_insert": "suggest",
             "local_audio_cues": "suggest",
+            "soundtrack_audio_mix": "suggest",
             "multi_material_assembly": "manual_required",
+            "cost_budget_governance": "manual_required",
+            "delivery_quality_governance": "auto_apply",
         },
     },
 }
@@ -575,18 +594,32 @@ def build_strategy_pipeline_plan(
 
     if normalized_strategy_type == "information_density":
         features.append("subtitle_timeline_projection")
+        features.append("source_media_review")
+        features.append("post_render_self_review")
         if tags & {"retake_likely", "silence_trim_useful", "talking_head", "single_speaker"}:
             features.append("retake_and_silence_review")
             reason_codes.append("speech_cleanup_signals")
     elif normalized_strategy_type == "step_demonstration":
+        features.extend(["source_media_review", "operation_focus_preview", "post_render_self_review"])
         reason_codes.append("step_demonstration_tags")
     elif normalized_strategy_type == "experience_and_mood":
+        features.extend(["reference_pacing_analysis", "soundtrack_audio_mix", "post_render_self_review"])
         reason_codes.append("experience_mood_tags")
     elif normalized_strategy_type == "event_highlight":
+        features.extend(["reference_pacing_analysis", "source_media_review", "soundtrack_audio_mix"])
         gates.append("highlight_review_recommended")
         reason_codes.append("event_highlight_tags")
     elif normalized_strategy_type == "narrative_assembly":
-        features.extend(["material_insert_plan", "storyboard_review", "timeline_preview"])
+        features.extend([
+            "budget_cost_estimate",
+            "generative_scene_plan",
+            "material_insert_plan",
+            "reference_pacing_analysis",
+            "stock_footage_retrieval",
+            "storyboard_review",
+            "soundtrack_audio_mix",
+            "timeline_preview",
+        ])
         reason_codes.append("assembly_or_remix_tags")
 
     if "subtitle_important" in tags and "subtitle_timeline_projection" not in features:

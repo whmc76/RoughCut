@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RoughCut Full Page Design Board</title>
+  <style>
+    :root {
+      --bg: #f5f8fa;
+      --panel: #ffffff;
+      --panel-soft: #f8fbfc;
+      --line: #dce6ea;
+      --line-strong: #bfd0d6;
+      --ink: #102033;
+      --muted: #637487;
+      --subtle: #8aa0ad;
+      --teal: #0f8b8d;
+      --teal-strong: #08797c;
+      --teal-soft: #dff3f1;
+      --green: #18865a;
+      --green-soft: #e4f5ec;
+      --amber: #b56b16;
+      --amber-soft: #fff1d6;
+      --red: #b43a3a;
+      --red-soft: #fae4e4;
+      --nav: #0d1c2a;
+      --nav-soft: #13283a;
+      --shadow: 0 16px 40px rgba(16, 32, 51, .08);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: #dfe8ec; color: var(--ink); font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", Arial, sans-serif; }
+    body { min-height: 100vh; }
+    button, input, textarea, select { font: inherit; }
+    .board-index { max-width: 1200px; margin: 0 auto; padding: 40px; }
+    .board-index h1 { margin: 0 0 10px; font-size: 32px; }
+    .board-index p { color: var(--muted); margin: 0 0 24px; }
+    .index-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .index-grid a { display: block; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: white; color: var(--ink); text-decoration: none; }
+    .screen { width: 1440px; height: 900px; overflow: hidden; background: var(--bg); display: grid; grid-template-columns: 224px 1fr; }
+    .rail { background: var(--nav); color: #dbe8ef; padding: 18px 14px; display: flex; flex-direction: column; }
+    .brand { display: flex; align-items: center; gap: 10px; padding: 0 2px 24px; }
+    .mark { width: 34px; height: 34px; border-radius: 8px; background: linear-gradient(135deg, #7ee3df, #0f8b8d); display: grid; place-items: center; color: var(--nav); font-weight: 900; }
+    .brand strong { display: block; font-size: 18px; color: white; }
+    .brand span { display: block; color: #8ca4b5; font-size: 12px; margin-top: 2px; }
+    .nav-group { margin: 14px 0; }
+    .nav-label { padding: 0 8px 8px; color: #8298aa; font-size: 12px; font-weight: 700; }
+    .nav-item { height: 36px; display: flex; align-items: center; gap: 10px; padding: 0 10px; border-radius: 7px; color: #dbe8ef; font-weight: 700; font-size: 14px; }
+    .nav-item.active { background: linear-gradient(90deg, #0f8b8d, #0b777a); color: white; }
+    .nav-icon { width: 16px; height: 16px; border: 1.8px solid currentColor; border-radius: 4px; opacity: .92; }
+    .rail-foot { margin-top: auto; border-top: 1px solid rgba(255,255,255,.1); padding-top: 14px; font-size: 12px; color: #93a9b8; }
+    .stage { padding: 18px 22px 22px; overflow: hidden; }
+    .page-head { display: grid; grid-template-columns: 1fr auto; gap: 16px; align-items: start; margin-bottom: 14px; }
+    .eyebrow { font-size: 12px; color: var(--teal); font-weight: 800; margin-bottom: 4px; }
+    h1 { margin: 0; font-size: 28px; line-height: 1.15; }
+    .desc { margin: 6px 0 0; color: var(--muted); font-size: 14px; }
+    .actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; flex-wrap: wrap; }
+    .btn { height: 34px; border-radius: 6px; border: 1px solid var(--line-strong); background: white; color: var(--ink); padding: 0 12px; font-weight: 800; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
+    .btn.primary { border-color: var(--teal-strong); background: var(--teal); color: white; }
+    .btn.danger { border-color: #dfb7b7; color: var(--red); background: #fff7f7; }
+    .summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 12px; }
+    .metric { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-height: 76px; padding: 12px; box-shadow: var(--shadow); }
+    .metric span { display: block; color: var(--muted); font-size: 12px; font-weight: 700; }
+    .metric strong { display: block; margin-top: 6px; font-size: 24px; }
+    .metric small { display: block; margin-top: 4px; color: var(--subtle); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); overflow: hidden; }
+    .panel.pad { padding: 14px; }
+    .panel-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+    .panel-head strong { display: block; font-size: 15px; }
+    .panel-head span { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .chip { display: inline-flex; height: 24px; align-items: center; border-radius: 999px; padding: 0 9px; font-size: 12px; font-weight: 800; background: #edf4f6; color: var(--muted); white-space: nowrap; }
+    .chip.ok { background: var(--green-soft); color: var(--green); }
+    .chip.warn { background: var(--amber-soft); color: var(--amber); }
+    .chip.bad { background: var(--red-soft); color: var(--red); }
+    .chip.teal { background: var(--teal-soft); color: var(--teal-strong); }
+    .table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .table th, .table td { border-bottom: 1px solid var(--line); padding: 9px 10px; text-align: left; vertical-align: middle; }
+    .table th { color: var(--muted); background: #f7fafb; font-weight: 800; }
+    .row-list { display: grid; gap: 8px; padding: 12px; }
+    .row { min-height: 52px; border: 1px solid var(--line); border-radius: 7px; padding: 10px; display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; background: #fbfdfe; }
+    .row strong { display: block; font-size: 13px; }
+    .row span, .row small { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .split { display: grid; grid-template-columns: 310px 1fr 330px; gap: 12px; height: 708px; }
+    .split.two { grid-template-columns: 340px 1fr; }
+    .split.wide-left { grid-template-columns: 380px 1fr 300px; }
+    .main-stack { display: grid; gap: 12px; align-content: start; min-height: 0; }
+    .video { background: #111923; border-radius: 8px; min-height: 260px; color: white; display: grid; place-items: center; position: relative; overflow: hidden; }
+    .video::before { content: ""; position: absolute; inset: 0; background: linear-gradient(135deg, rgba(126,227,223,.18), transparent 42%), repeating-linear-gradient(135deg, rgba(255,255,255,.04) 0 1px, transparent 1px 28px); }
+    .video strong { position: relative; font-size: 20px; }
+    .inspector { display: grid; gap: 10px; padding: 12px; }
+    .field { border: 1px solid var(--line); border-radius: 7px; padding: 9px; background: var(--panel-soft); }
+    .field label, .field span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; font-weight: 700; }
+    .field strong, .field p { display: block; margin: 0; font-size: 13px; line-height: 1.4; }
+    .input { height: 34px; width: 100%; border: 1px solid var(--line-strong); border-radius: 6px; background: white; padding: 0 10px; color: var(--muted); }
+    textarea.input { height: 96px; padding: 9px 10px; resize: none; line-height: 1.4; }
+    .lane-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .lane { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 12px; min-height: 116px; }
+    .lane em { display: block; font-style: normal; color: var(--subtle); font-size: 12px; }
+    .lane strong { display: block; font-size: 24px; margin: 7px 0 3px; }
+    .flow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .flow-step { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: #fbfefe; min-height: 96px; }
+    .flow-step small { color: var(--teal); font-weight: 900; }
+    .flow-step strong { display: block; margin: 8px 0 3px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .mini-preview { min-height: 140px; border: 1px solid var(--line); border-radius: 8px; background: linear-gradient(135deg, #f8fbfc, #eaf3f5); padding: 12px; display: grid; align-content: end; }
+    .tiny-bars { display: grid; gap: 5px; margin-top: 8px; }
+    .tiny-bars span { height: 8px; border-radius: 999px; background: #d7e3e7; }
+    .tiny-bars span:nth-child(2) { width: 74%; }
+    .tiny-bars span:nth-child(3) { width: 52%; }
+    .notice { border: 1px solid var(--line); border-radius: 8px; padding: 11px 12px; background: #f8fbfc; color: var(--muted); font-size: 13px; }
+    .modal-shell { height: 708px; display: grid; place-items: center; background: linear-gradient(135deg, #eef5f6, #f8fbfc); border: 1px solid var(--line); border-radius: 8px; }
+    .modal { width: 880px; min-height: 560px; background: white; border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 24px 80px rgba(16,32,51,.18); display: grid; grid-template-columns: 260px 1fr; overflow: hidden; }
+    .modal aside { background: #f7fafb; border-right: 1px solid var(--line); padding: 14px; }
+    .modal main { padding: 14px; display: grid; gap: 12px; align-content: start; }
+    .timeline { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; height: 76px; align-items: end; }
+    .timeline span { background: var(--teal-soft); border: 1px solid #b7dcda; border-radius: 5px 5px 0 0; }
+    .timeline span:nth-child(2n) { height: 50px; }
+    .timeline span:nth-child(2n+1) { height: 68px; }
+    .timeline span:nth-child(3) { background: var(--amber-soft); border-color: #e2c48c; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script>
+    const screens = [
+      ["overview", "总览", "/"],
+      ["jobs", "制片队列", "/jobs"],
+      ["final-review", "成片审看", "/final-review"],
+      ["publication-tracking", "发布跟踪", "/publication-tracking"],
+      ["creator-cards", "创作者卡片", "/creator-cards"],
+      ["task-strategies", "任务策略", "/task-strategies"],
+      ["visual-plans", "视觉方案", "/visual-plans"],
+      ["terms-memory", "术语与记忆", "/terms-memory"],
+      ["tools", "工具箱", "/tools"],
+      ["settings", "系统设置", "/settings"],
+      ["control", "服务控制", "/control"],
+      ["intelligent-copy", "智能发布旧页", "/intelligent-copy"],
+      ["publication-management", "发布配置", "/publication-management"],
+      ["watch-roots", "自动任务", "/watch-roots"],
+      ["tools-tts", "TTS", "/tools/tts"],
+      ["tools-asr", "ASR", "/tools/asr"],
+      ["tools-avatar", "数字人", "/tools/avatar"],
+      ["manual-editor", "手工编辑器", "/jobs/:jobId/manual-editor"]
+    ];
+
+    const nav = {
+      "工作流": [["overview", "总览"], ["jobs", "制片队列"], ["final-review", "成片审看"], ["publication-tracking", "发布跟踪"]],
+      "资产库": [["creator-cards", "创作者卡片"], ["task-strategies", "任务策略"], ["visual-plans", "视觉方案"], ["terms-memory", "术语与记忆"]],
+      "系统": [["tools", "工具箱"], ["settings", "系统设置"], ["control", "服务控制"]]
+    };
+
+    const copy = {
+      overview: ["系统总览", "跨工作流查看队列压力、服务健康、自动目录和最近活动。"],
+      jobs: ["生产控制", "导入、排队、运行、恢复和交接完成输出，不在这里做最终审看或平台发布。"],
+      "final-review": ["观众验收", "看最终成片，完成观众体验清单，决定通过进入发布跟踪或退回重剪。"],
+      "publication-tracking": ["半手动发布", "选择成片和物料，复制内容，打开平台发布页，发布完成后回填链接和回执。"],
+      "creator-cards": ["资产库", "维护创作者身份、平台账号、素材、偏好和默认方案关系。"],
+      "task-strategies": ["资产库", "生成、比较并激活任务策略，明确适用任务和审核门槛。"],
+      "visual-plans": ["资产库", "管理包装、字幕、封面方向、画面增强和平台适配约束。"],
+      "terms-memory": ["知识校准", "维护术语表、学习记忆、热词和最近纠错反馈。"],
+      tools: ["诊断工具", "验证 ASR、TTS 和数字人口播服务，执行单次调试。"],
+      settings: ["系统配置", "配置模型、质量阈值、运行环境、通知和集成。"],
+      control: ["运行控制", "查看健康、补偿队列、诊断细项和维护停机。"],
+      "intelligent-copy": ["兼容流程", "选择本地输出目录生成平台物料，完成后进入发布跟踪。"],
+      "publication-management": ["平台配置", "维护创作者平台档案、账号绑定、登录确认和物料要求。"],
+      "watch-roots": ["自动任务", "检查监听目录和待处理文件，按规则入队。"],
+      "tools-tts": ["工具箱", "选择 TTS provider 和模式，输入脚本，生成并预览语音。"],
+      "tools-asr": ["工具箱", "上传音频，带热词转写，检查文本和分段。"],
+      "tools-avatar": ["工具箱", "上传主播视频和配音，生成数字人口播预览。"],
+      "manual-editor": ["制片队列", "围绕单个任务修脚本、素材、时间线和导出准备。"]
+    };
+
+    function el(tag, cls, html) {
+      const node = document.createElement(tag);
+      if (cls) node.className = cls;
+      if (html != null) node.innerHTML = html;
+      return node;
+    }
+
+    function rail(active) {
+      const aside = el("aside", "rail");
+      aside.append(el("div", "brand", `<div class="mark">R</div><div><strong>RoughCut</strong><span>Operator Console</span></div>`));
+      for (const [group, items] of Object.entries(nav)) {
+        const wrap = el("div", "nav-group");
+        wrap.append(el("div", "nav-label", group));
+        items.forEach(([key, label]) => wrap.append(el("div", `nav-item ${key === active ? "active" : ""}`, `<span class="nav-icon"></span>${label}`)));
+        aside.append(wrap);
+      }
+      aside.append(el("div", "rail-foot", `<strong>混合模式</strong><br>当前 Bundled<br><br><strong>界面语言</strong><br>简中&nbsp;&nbsp;EN`));
+      return aside;
+    }
+
+    function head(key, title, actions = []) {
+      const [eyebrow, desc] = copy[key];
+      return `<header class="page-head"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p class="desc">${desc}</p></div><div class="actions">${actions.join("")}</div></header>`;
+    }
+
+    function btn(label, primary = false, danger = false) {
+      return `<button class="btn ${primary ? "primary" : ""} ${danger ? "danger" : ""}">${label}</button>`;
+    }
+
+    function summary(items) {
+      return `<div class="summary">${items.map(i => `<div class="metric"><span>${i[0]}</span><strong>${i[1]}</strong><small>${i[2]}</small></div>`).join("")}</div>`;
+    }
+
+    function panel(title, desc, body, action = "") {
+      return `<section class="panel"><div class="panel-head"><div><strong>${title}</strong><span>${desc}</span></div>${action}</div>${body}</section>`;
+    }
+
+    function rows(items) {
+      return `<div class="row-list">${items.map(i => `<div class="row"><div><strong>${i[0]}</strong><span>${i[1]}</span></div><span class="chip ${i[2] || ""}">${i[3]}</span></div>`).join("")}</div>`;
+    }
+
+    function table(headers, body) {
+      return `<table class="table"><thead><tr>${headers.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${body.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+    }
+
+    function overview() {
+      return head("overview", "总览", [btn("刷新"), btn("打开服务控制", true)])
+        + summary([["总任务", "50", "当前库内任务"], ["运行中", "4", "worker 正在处理"], ["待处理", "2", "失败或需人工确认"], ["服务在线", "8/8", "运行健康"]])
+        + `<div class="split two"><div class="main-stack">${panel("工作入口", "进入具体页面处理任务，不在首页完成业务决策", rows([["制片队列", "导入、运行、恢复和成片交接", "teal", "进入"], ["成片审看", "检查最终成片并决定通过或退回", "", "进入"], ["自动任务", "查看监听目录和待入库素材", "", "进入"], ["工具箱", "诊断 ASR、TTS、数字人和临时工具", "", "进入"]]))}${panel("当前队列", "只显示正在推进和需要注意的任务", rows([["瑞士军刀收藏盘点", "增强版 MP4 已生成，等待审看", "teal", "待审"], ["S02E06 · 挖树桩", "失败，等待恢复处理", "bad", "异常"], ["S02E49 · 安静的游戏", "处理中", "teal", "运行"]]))}</div><div class="main-stack">${panel("运行健康", "服务状态和补偿队列是首页默认信号", `<div class="lane-grid"><div class="lane"><em>api</em><strong>在线</strong><span class="chip ok">ready</span></div><div class="lane"><em>orchestrator</em><strong>在线</strong><span class="chip ok">ready</span></div><div class="lane"><em>media_worker</em><strong>在线</strong><span class="chip ok">ready</span></div><div class="lane"><em>llm_worker</em><strong>在线</strong><span class="chip ok">ready</span></div></div>`)}${panel("最近活动", "生产、审看和系统事件的跨页面记录", table(["时间", "页面", "事件", "下一步"], [["14:31", "服务控制", "补偿队列已清空", "完成"], ["14:18", "成片审看", "退回重剪", "制片队列"], ["13:42", "制片队列", "重跑成功", "审看"]]))}</div></div>`;
+    }
+
+    function jobs() {
+      return head("jobs", "制片队列", [btn("刷新"), btn("全能剪辑"), btn("智能导演"), btn("解说二创", true)])
+        + summary([["待处理", "9", "等待入库或 worker"], ["运行中", "4", "剪辑和包装"], ["需处理", "3", "失败恢复"], ["完成输出", "6", "可交接审看"]])
+        + `<div class="main-stack">${panel("生产状态带", "第一屏回答今天卡在哪里", `<div class="flow"><div class="flow-step"><small>01</small><strong>导入和排队</strong><span>校验素材、脚本和创作者绑定</span></div><div class="flow-step"><small>02</small><strong>运行和恢复</strong><span>重试、取消、打开文件夹、查看日志</span></div><div class="flow-step"><small>03</small><strong>完成输出交接</strong><span>审看完成输出，不能跳过观众验收</span></div></div>`)}<div class="split two" style="height:510px"><div class="main-stack">${panel("完成输出", "只给交接动作，不做最终发布", rows([["MAXACE 美杜莎4 开箱", "enhanced_mp4 优先，字幕已打包", "teal", "审看"], ["户外装备清单分享", "packaged_mp4 可用", "teal", "审看"], ["EDC 工具使用技巧", "等待封面检查", "warn", "详情"]]))}${panel("失败恢复", "失败原因要可见，可直接重试或打开日志", rows([["瑞士军刀收藏盘点", "ASR 结果为空", "bad", "重试"], ["MOT 风灵音叉", "输出目录缺权限", "bad", "打开"]]))}</div><div>${panel("任务队列", "详细操作面保留在表格", table(["文件", "状态", "步骤", "更新时间", "操作"], [["maxace.mp4", `<span class="chip ok">完成</span>`, "包装完成", "14:22", "审看 详情 下载"], ["outdoor.mov", `<span class="chip teal">运行</span>`, "字幕增强", "14:08", "详情 取消"], ["knife.mp4", `<span class="chip warn">待处理</span>`, "缺脚本", "13:55", "手工编辑"]]))}</div></div></div>`;
+    }
+
+    function finalReview() {
+      return head("final-review", "成片审看", [btn("退回重剪"), btn("通过并进入发布跟踪", true)])
+        + `<div class="split"><section class="panel">${panel("待审看成片", "从完成输出中选择", rows([["MAXACE 美杜莎4 开箱", "08:42 · enhanced_mp4", "teal", "当前"], ["瑞士军刀收藏盘点", "06:15 · packaged_mp4", "", "待审"], ["EDC 工具使用技巧", "07:28 · enhanced_mp4", "", "待审"]])).replace('<section class="panel">','').replace('</section>','')}</section><main class="main-stack">${panel("候选版本", "优先播放增强版，失败时展示不可用原因", `<div class="toolbar" style="padding:12px"><span class="chip teal">标准成片</span><span class="chip">包装成片</span><span class="chip">原始导出</span></div><div class="video"><strong>Final Video Player</strong></div>`)}${panel("成片信息和问题记录", "观众体验问题直接影响是否能进入发布跟踪", table(["项目", "候选版本", "大小", "状态"], [["MAXACE 美杜莎4", "enhanced_mp4", "842 MB", `<span class="chip warn">待确认</span>`]]) + rows([["字幕可读性", "重点画面没有被字幕遮挡", "ok", "通过"], ["音频平衡", "人声、音乐、音效正常", "ok", "通过"], ["结尾完整", "片尾声明和封面导向待确认", "warn", "待确认"]]))}</main><aside class="panel"><div class="panel-head"><div><strong>观众体验清单</strong><span>通过前必须完成</span></div><span class="chip warn">4/5</span></div><div class="inspector">${["开头 3 秒能看懂主题", "字幕可读且不遮挡重点", "人声、音乐和音效平衡", "节奏没有明显空拍", "结尾完整且适合发布"].map((x,i)=>`<div class="field"><label><input type="checkbox" ${i<4?"checked":""}> ${x}</label><span>${i<4?"已确认":"待确认"}</span></div>`).join("")}<div class="field"><span>总体评价</span><textarea class="input">整体表现良好，结尾封面导向确认后可进入发布跟踪。</textarea></div></div></aside></div>`;
+    }
+
+    function publicationTracking() {
+      return head("publication-tracking", "发布跟踪", [btn("生成物料"), btn("配置账号"), btn("保存回填", true)])
+        + summary([["待发布视频", "7", "已生成物料任务"], ["已生成物料", "8", "多平台标题正文标签"], ["待回填", "4", "发布后保存链接"], ["已发布", "4", "可追踪历史"]])
+        + `<div class="split"><section class="panel">${panel("选择待发布视频", "所有发布动作绑定到一个成片和物料任务", `<div style="padding:12px"><input class="input" value="搜索成片 / 任务"></div>${rows([["MAXACE 美杜莎4 开箱", "08:42 · 物料已生成", "teal", "当前"], ["瑞士军刀收藏盘点", "06:15 · 物料已生成", "", "选择"], ["户外装备清单分享", "10:03 · 等待封面", "warn", "处理"]])}`).replace('<section class="panel">','').replace('</section>','')}</section><main class="main-stack">${panel("成片预览", "发布前确认视频、字幕、封面和物料目录", `<div class="preview-grid"><div class="video" style="min-height:210px"><strong>00:00 / 08:42</strong></div><div class="inspector"><div class="field"><span>成片视频</span><strong>/outputs/MAXACE_1080p.mp4</strong></div><div class="field"><span>字幕文件</span><strong>/outputs/MAXACE.srt</strong></div><div class="field"><span>封面来源</span><strong>/covers/maxace.jpg</strong></div></div></div>`)}${panel("半手动发布流程", "RC 提供物料和入口，用户在平台完成发布并回填", `<div class="flow"><div class="flow-step"><small>1</small><strong>生成物料</strong><span>标题、正文、标签、封面路径</span></div><div class="flow-step"><small>2</small><strong>打开发布页</strong><span>跳到平台发布后台粘贴内容</span></div><div class="flow-step"><small>3</small><strong>回填结果</strong><span>公开视频链接、回执 ID、Post ID</span></div></div>`)}${panel("平台状态", "每个平台都有发布入口、复制动作和回填状态", table(["平台", "账号", "状态", "操作", "回填"], [["抖音", "抖音运营号", `<span class="chip warn">待回填</span>`, "打开发布页 复制标题 正文 标签", "回填链接"], ["B站", "B站运营号", `<span class="chip warn">待发布</span>`, "打开发布页 复制标题 正文 标签", "回填链接"], ["视频号", "视频号运营号", `<span class="chip ok">已回填</span>`, "查看物料", "查看链接"]]))}</main><aside class="panel"><div class="panel-head"><div><strong>抖音发布面板</strong><span>复制物料，发布完成后保存链接</span></div></div><div class="inspector"><div class="field"><span>标题</span><strong>MAXACE 美杜莎4 开箱体验</strong></div><div class="field"><span>正文</span><p>刀型设计、细节做工、上手手感全面分享。</p></div><div class="field"><span>标签</span><strong>#EDC #折刀 #MAXACE</strong></div><button class="btn primary">打开发布页</button><div class="field"><span>公开视频链接</span><input class="input" value="https://v.douyin.com/abc123/"></div><div class="field"><span>回执 ID</span><input class="input" value="receipt-binding:abc123"></div><button class="btn primary">保存回填</button></div></aside></div>`;
+    }
+
+    function creatorCards() {
+      return head("creator-cards", "创作者卡片", [btn("新建创作者", true), btn("导入资产")])
+        + `<div class="split wide-left"><section class="panel">${panel("创作者", "选择身份后维护账号、素材和默认关系", rows([["MAXACE 开箱号", "刀具 EDC · 抖音/B站/视频号", "teal", "当前"], ["户外装备实验室", "露营 · 小红书/B站", "", "选择"], ["音叉推牌频道", "声音疗愈 · 视频号", "", "选择"]])).replace('<section class="panel">','').replace('</section>','')}</section><main class="main-stack">${panel("身份与偏好", "发布配置的源头，但不在这里执行发布", `<div class="preview-grid"><div class="field"><span>创作者定位</span><strong>高可信 EDC 工具评测</strong></div><div class="field"><span>受众</span><strong>刀具收藏、户外装备、工具控</strong></div><div class="field"><span>默认平台</span><strong>抖音、B站、视频号</strong></div><div class="field"><span>内容语气</span><strong>克制、实测、少营销词</strong></div></div>`)}${panel("素材库", "头像、片头、参考音色、封面模板按类别管理", `<div class="preview-grid"><div class="mini-preview"><strong>头像与标识</strong><div class="tiny-bars"><span></span><span></span><span></span></div></div><div class="mini-preview"><strong>参考音色</strong><div class="tiny-bars"><span></span><span></span><span></span></div></div><div class="mini-preview"><strong>封面模板</strong><div class="tiny-bars"><span></span><span></span><span></span></div></div><div class="mini-preview"><strong>片头片尾</strong><div class="tiny-bars"><span></span><span></span><span></span></div></div></div>`)}</main><aside class="panel"><div class="panel-head"><div><strong>默认关系</strong><span>影响策略和视觉方案</span></div></div><div class="inspector">${["任务策略: EDC 开箱标准版", "视觉方案: 深色工作台封面", "发布档案: 国内四平台", "术语包: 刀具/钢材/结构"].map(x=>`<div class="field"><strong>${x}</strong><span>可更换，但不执行发布</span></div>`).join("")}</div></aside></div>`;
+    }
+
+    function strategyPage() {
+      return head("task-strategies", "任务策略", [btn("智能生成"), btn("激活策略", true)])
+        + `<div class="split two"><section class="panel">${panel("策略输入", "先选创作者，再定义任务目标和审核门槛", `<div class="inspector"><div class="field"><span>创作者</span><strong>MAXACE 开箱号</strong></div><div class="field"><span>策略想法</span><textarea class="input">突出开箱、结构细节和真实握持感，减少夸张口播。</textarea></div><div class="field"><span>适用任务</span><strong>解说二创、产品开箱、评测剪辑</strong></div><button class="btn primary">生成候选策略</button></div>`).replace('<section class="panel">','').replace('</section>','')}</section><main class="main-stack">${panel("候选策略比较", "必须能比较并激活，不能只是展示文案", table(["策略", "适用性", "审核门槛", "状态", "操作"], [["EDC 开箱标准版", "92", "观众体验 5/5", `<span class="chip ok">已激活</span>`, "查看"], ["快节奏短视频版", "84", "开头 3 秒强钩子", `<span class="chip">候选</span>`, "激活"], ["长评测讲解版", "78", "保留结构说明", `<span class="chip">候选</span>`, "激活"]]))}${panel("执行规则", "策略要落到可执行的分镜、节奏、审查要求", rows([["开头规则", "3 秒内出现产品和核心结论", "ok", "启用"], ["节奏规则", "每 20 秒至少一次画面变化", "ok", "启用"], ["审核门槛", "字幕、音频、结尾必须全部通过", "warn", "人工确认"]]))}</main></div>`;
+    }
+
+    function visualPlans() {
+      return head("visual-plans", "视觉方案", [btn("智能生成"), btn("激活方案", true)])
+        + `<div class="split two"><section class="panel">${panel("视觉输入", "绑定创作者和平台适配要求", `<div class="inspector"><div class="field"><span>创作者</span><strong>MAXACE 开箱号</strong></div><div class="field"><span>视觉想法</span><textarea class="input">深色工作台、金属质感、封面突出刀型轮廓和型号。</textarea></div><div class="field"><span>平台适配</span><strong>抖音 9:16、B站 16:9、视频号 9:16</strong></div><button class="btn primary">生成视觉方案</button></div>`).replace('<section class="panel">','').replace('</section>','')}</section><main class="main-stack">${panel("包装预览", "封面、字幕、增强和平台适配都要可检查", `<div class="preview-grid"><div class="mini-preview"><strong>封面方向</strong><span>产品占画面 70%</span></div><div class="mini-preview"><strong>字幕安全区</strong><span>避开主体和平台控件</span></div><div class="mini-preview"><strong>画面增强</strong><span>冷白平衡，保留金属纹理</span></div><div class="mini-preview"><strong>平台裁切</strong><span>9:16/16:9 双版本</span></div></div>`)}${panel("方案状态", "激活后被制片和发布物料引用", table(["方案", "封面", "字幕", "平台", "状态"], [["深色工作台标准版", "已配置", "安全区通过", "4 平台", `<span class="chip ok">已激活</span>`], ["浅色桌面测试版", "候选", "待确认", "2 平台", `<span class="chip">候选</span>`]]))}</main></div>`;
+    }
+
+    function termsMemory() {
+      return head("terms-memory", "术语与记忆", [btn("导入词包"), btn("新增术语", true)])
+        + summary([["术语", "312", "全局和领域词"], ["热词", "48", "ASR 上下文"], ["纠错", "9", "待处理"], ["记忆", "7", "创作者偏好"]])
+        + `<div class="split two"><section class="panel">${panel("术语维护", "错误写法、正确写法、作用域必须同屏", table(["错误写法", "正确写法", "作用域", "状态"], [["马塞克", "MAXACE", "刀具领域", `<span class="chip ok">启用</span>`], ["美杜沙", "美杜莎", "产品名", `<span class="chip ok">启用</span>`], ["折到", "折刀", "全局", `<span class="chip warn">待审</span>`]])).replace('<section class="panel">','').replace('</section>','')}${panel("最近纠错", "人工确认后写入术语或记忆", rows([["字幕纠错", "MAXACE 被识别为 max ace", "warn", "待处理"], ["口播偏好", "减少夸张营销词", "teal", "学习"]]))}</section><main class="main-stack">${panel("记忆统计", "偏好要能追溯，不影响生产控制", `<div class="lane-grid"><div class="lane"><em>语气</em><strong>克制</strong><span class="chip teal">偏好</span></div><div class="lane"><em>节奏</em><strong>中快</strong><span class="chip teal">偏好</span></div><div class="lane"><em>字幕</em><strong>大字</strong><span class="chip teal">偏好</span></div><div class="lane"><em>封面</em><strong>产品主导</strong><span class="chip teal">偏好</span></div></div>`)}${panel("热词上下文", "ASR 工具和生产队列会引用", rows([["刀具钢材", "M390、S35VN、钛柄", "ok", "启用"], ["品牌型号", "MAXACE、美杜莎、MOT", "ok", "启用"]]))}</main></div>`;
+    }
+
+    function tools() {
+      return head("tools", "工具箱", [btn("刷新状态"), btn("运行诊断", true)])
+        + `<div class="split two"><section class="panel">${panel("选择能力", "工具页只做单次诊断，不替代主流程", rows([["TTS 文本转语音", "CosyVoice3 / MOSS-TTS Local", "teal", "打开"], ["ASR 音频转文字", "faster-whisper large-v3", "teal", "打开"], ["数字人口播", "HeyGem 预览", "warn", "打开"]])).replace('<section class="panel">','').replace('</section>','')}</section><main class="main-stack">${panel("工具服务在线状态", "诊断状态和最近一次运行结果", table(["服务", "Provider", "状态", "最近运行", "操作"], [["TTS", "CosyVoice3", `<span class="chip ok">online</span>`, "14:21 成功", "打开"], ["ASR", "faster-whisper", `<span class="chip ok">online</span>`, "13:58 成功", "打开"], ["Avatar", "HeyGem", `<span class="chip warn">degraded</span>`, "12:10 超时", "诊断"]]))}${panel("诊断日志", "错误直接给修复入口", rows([["Avatar timeout", "HeyGem 队列超过 10 分钟", "warn", "查看"], ["ASR ready", "热词已加载 48 条", "ok", "正常"]]))}</main></div>`;
+    }
+
+    function settings() {
+      return head("settings", "系统设置", [btn("恢复默认"), btn("保存配置", true)])
+        + summary([["执行设置", "Hybrid", "主推理和搜索路由"], ["质量阈值", "0.82", "包装和术语审核"], ["运行环境", "output", "本地输出目录"], ["通知", "Telegram", "审核和远程控制"]])
+        + `<div class="split two"><section class="panel">${panel("常用设置", "先暴露影响工作流的配置摘要", rows([["模型与执行", "主推理、搜索、Hybrid 路由", "teal", "编辑"], ["质量与输出", "包装复核和术语阈值", "teal", "编辑"], ["运行与通知", "目录、数字人、Telegram", "teal", "编辑"]])).replace('<section class="panel">','').replace('</section>','')}</section><main class="main-stack">${panel("模型与执行", "配置保存状态必须可见", table(["配置项", "当前值", "影响范围", "状态"], [["LLM routing", "hybrid_performance", "摘要/字幕/文案", `<span class="chip ok">已保存</span>`], ["Search provider", "auto fallback", "资料检索", `<span class="chip ok">已保存</span>`], ["Output dir", "/app/data/output", "制片/发布", `<span class="chip warn">待验证</span>`]]))}${panel("相关页面", "知识校准和服务控制从这里可达，但不混入设置表单", `<div class="flow"><div class="flow-step"><small>知识</small><strong>术语与记忆</strong><span>维护词表和偏好</span></div><div class="flow-step"><small>运行</small><strong>服务控制</strong><span>健康、补偿、停机</span></div><div class="flow-step"><small>工具</small><strong>工具箱</strong><span>诊断 ASR/TTS/Avatar</span></div></div>`)}</main></div>`;
+    }
+
+    function control() {
+      return head("control", "服务控制", [btn("刷新健康"), btn("进入维护", false, true)])
+        + summary([["API", "ready", "主服务在线"], ["Worker", "3/4", "一个 worker 延迟"], ["补偿队列", "6", "审核通知待处理"], ["停机锁", "free", "允许维护"]])
+        + `<div class="split two"><section class="panel">${panel("服务状态", "状态页要能直接定位第一坏层", table(["服务", "状态", "详情", "操作"], [["api", `<span class="chip ok">ready</span>`, "200ms", "日志"], ["worker-a", `<span class="chip ok">ready</span>`, "idle", "日志"], ["avatar", `<span class="chip warn">degraded</span>`, "timeout", "诊断"], ["telegram", `<span class="chip ok">ready</span>`, "connected", "测试"]])).replace('<section class="panel">','').replace('</section>','')}${panel("补偿队列", "审核通知可重排或丢弃", rows([["review:abc123", "job=maxace · attempts=2", "warn", "Requeue"], ["review:abc124", "job=outdoor · due now", "warn", "Drop"]]))}</section><main class="main-stack">${panel("健康详情", "运行细项单独展示，不和内容决策混在一起", rows([["Runtime readiness", "orchestrator lock free", "ok", "pass"], ["Live readiness", "batch report stable 3/3", "ok", "pass"], ["Managed services", "avatar degraded", "warn", "inspect"]]))}${panel("停机控制", "危险操作必须聚合在维护区", `<div class="notice">进入维护会停止新任务入队，但不会删除已有任务。</div><div class="toolbar" style="padding:12px"><button class="btn">暂停入队</button><button class="btn danger">执行停机</button></div>`)}</main></div>`;
+    }
+
+    function intelligentCopy() {
+      return head("intelligent-copy", "智能发布旧页", [btn("生成物料", true), btn("进入发布跟踪")])
+        + `<div class="split two"><section class="panel">${panel("目录与风格", "兼容旧入口，核心任务是生成物料", `<div class="inspector"><div class="field"><span>本地输出目录</span><input class="input" value="/app/data/output/MAXACE_美杜莎4"></div><div class="field"><span>创作者</span><strong>MAXACE 开箱号</strong></div><div class="field"><span>平台</span><strong>抖音、B站、小红书、视频号</strong></div><button class="btn primary">生成平台物料</button></div>`).replace('<section class="panel">','').replace('</section>','')}</section><main class="main-stack">${panel("物料预览", "旧页可以预览和复制，但发布执行移交发布跟踪", table(["平台", "标题", "正文", "标签", "下一步"], [["抖音", "已生成", "已生成", "已生成", "去发布跟踪"], ["B站", "已生成", "已生成", "已生成", "去发布跟踪"], ["视频号", "已生成", "已生成", "已生成", "去发布跟踪"]]))}${panel("最近任务", "用户能选回已生成物料继续发布", rows([["MAXACE 美杜莎4", "material_dir 已生成", "ok", "继续发布"], ["瑞士军刀收藏", "封面缺失", "warn", "修复"]]))}</main></div>`;
+    }
+
+    function publicationManagement() {
+      return head("publication-management", "平台发布档案", [btn("新增平台"), btn("测试登录", true)])
+        + `<div class="split two"><section class="panel">${panel("创作者选择", "配置绑定归属于创作者，不执行发布", rows([["MAXACE 开箱号", "4 个平台账号", "teal", "当前"], ["户外装备实验室", "2 个平台账号", "", "选择"]])).replace('<section class="panel">','').replace('</section>','')}</section><main class="main-stack">${panel("平台账号绑定", "发布跟踪读取这里的账号和入口", table(["平台", "账号", "登录状态", "发布入口", "操作"], [["抖音", "抖音运营号", `<span class="chip ok">已打开</span>`, "creator.douyin.com", "重绑"], ["B站", "B站运营号", `<span class="chip warn">待登录</span>`, "member.bilibili.com", "绑定"], ["小红书", "小红书运营号", `<span class="chip warn">待确认</span>`, "creator.xiaohongshu.com", "确认"]]))}${panel("物料要求", "标题长度、标签、封面比例供发布跟踪使用", rows([["抖音", "标题 <= 55，标签 <= 8", "ok", "启用"], ["B站", "分区、合集、封面必填", "ok", "启用"]]))}</main></div>`;
+    }
+
+    function watchRoots() {
+      return head("watch-roots", "自动任务", [btn("刷新"), btn("入队所选", true)])
+        + `<div class="split two"><section class="panel">${panel("监听目录", "选择目录查看待处理内容", rows([["/incoming/edc", "12 个待处理文件", "teal", "当前"], ["/incoming/outdoor", "3 个待处理文件", "", "选择"], ["/incoming/archive", "无新增", "ok", "空"]])).replace('<section class="panel">','').replace('</section>','')}</section><main class="main-stack">${panel("待处理内容", "入队前展示规则匹配和缺失项", table(["文件", "识别类型", "创作者", "状态", "操作"], [["maxace-raw.mp4", "产品开箱", "MAXACE 开箱号", `<span class="chip ok">可入队</span>`, "入队"], ["knife-script.txt", "脚本", "MAXACE 开箱号", `<span class="chip ok">已匹配</span>`, "查看"], ["missing-cover.jpg", "封面", "未知", `<span class="chip warn">待确认</span>`, "绑定"]]))}${panel("入队方式", "自动目录只负责生成任务，不负责审看或发布", `<div class="flow"><div class="flow-step"><small>1</small><strong>扫描目录</strong><span>识别素材和脚本</span></div><div class="flow-step"><small>2</small><strong>匹配规则</strong><span>创作者、任务类型、模板</span></div><div class="flow-step"><small>3</small><strong>创建任务</strong><span>进入制片队列</span></div></div>`)}</main></div>`;
+    }
+
+    function toolDetail(kind) {
+      const data = {
+        "tools-tts": ["TTS 文本转语音", "生成语音", "Provider 与模式", "参考音频", "脚本文本", "音频预览"],
+        "tools-asr": ["ASR 音频转文字", "开始转写", "ASR 服务", "音频文件", "热词上下文", "转写结果"],
+        "tools-avatar": ["数字人口播", "生成预览", "HeyGem 服务", "主播视频", "配音音频", "预览视频"]
+      }[kind];
+      return head(kind, data[0], [btn("返回工具箱"), btn(data[1], true)])
+        + `<div class="split two"><section class="panel">${panel(data[2], "工具子页保留输入、运行和结果三段", `<div class="inspector"><div class="field"><span>${data[3]}</span><input class="input" value="选择或拖入文件"></div><div class="field"><span>${data[4]}</span><textarea class="input">用于本次工具测试的输入内容。</textarea></div><div class="field"><span>参数</span><strong>官方推荐预设，允许高级展开</strong></div><button class="btn primary">${data[1]}</button></div>`).replace('<section class="panel">','').replace('</section>','')}</section><main class="main-stack">${panel(data[5], "结果可预览、复制、下载，并显示错误", `<div class="video" style="background:#eef5f6;color:var(--ink);min-height:240px"><strong>${data[5]}</strong></div>`)}${panel("运行日志", "工具测试必须能定位失败原因", rows([["提交任务", "参数校验通过", "ok", "完成"], ["服务调用", "等待本地服务返回", "teal", "运行中"], ["结果保存", "输出到临时目录", "", "待完成"]]))}</main></div>`;
+    }
+
+    function manualEditor() {
+      return head("manual-editor", "手工编辑器", [btn("保存草稿"), btn("导出并返回队列", true)])
+        + `<div class="modal-shell"><div class="modal"><aside><div class="panel-head" style="padding:0 0 12px;border-bottom:0"><div><strong>MAXACE 美杜莎4</strong><span>job_rc_20260630_1422</span></div><span class="chip warn">需人工</span></div>${rows([["脚本段落", "12 段，可编辑口播和字幕", "teal", "打开"], ["素材轨道", "主视频、B-roll、封面", "teal", "打开"], ["就绪检查", "3 项待处理", "warn", "检查"]])}</aside><main>${panel("时间线", "围绕单个任务修剪，不替代全局队列", `<div class="timeline"><span></span><span></span><span></span><span></span><span></span><span></span></div>`)}${panel("脚本和字幕", "编辑会影响后续导出和成片审看", table(["段落", "口播", "字幕", "状态"], [["01", "开场介绍产品", "已同步", `<span class="chip ok">通过</span>`], ["02", "结构细节", "待校对", `<span class="chip warn">待处理</span>`], ["03", "握持体验", "已同步", `<span class="chip ok">通过</span>`]]))}${panel("导出就绪", "满足检查后返回制片队列继续流水线", rows([["素材齐全", "视频、脚本、音频均已绑定", "ok", "通过"], ["字幕校对", "第二段待校对", "warn", "处理"], ["封面方向", "引用视觉方案默认封面", "ok", "通过"]]))}</main></div></div>`;
+    }
+
+    const renderers = {
+      overview, jobs, "final-review": finalReview, "publication-tracking": publicationTracking,
+      "creator-cards": creatorCards, "task-strategies": strategyPage, "visual-plans": visualPlans,
+      "terms-memory": termsMemory, tools, settings, control, "intelligent-copy": intelligentCopy,
+      "publication-management": publicationManagement, "watch-roots": watchRoots,
+      "tools-tts": () => toolDetail("tools-tts"), "tools-asr": () => toolDetail("tools-asr"),
+      "tools-avatar": () => toolDetail("tools-avatar"), "manual-editor": manualEditor
+    };
+
+    function renderScreen(key) {
+      const title = screens.find(x => x[0] === key)?.[1] || key;
+      const screen = el("div", "screen");
+      screen.append(rail(key));
+      const stage = el("main", "stage");
+      stage.innerHTML = renderers[key]();
+      screen.append(stage);
+      return screen;
+    }
+
+    const params = new URLSearchParams(location.search);
+    const selected = params.get("screen");
+    const app = document.querySelector("#app");
+    if (selected && renderers[selected]) {
+      app.append(renderScreen(selected));
+    } else {
+      const index = el("div", "board-index", `<h1>RoughCut Full Page Design Board</h1><p>Open a frame with <code>?screen=&lt;key&gt;</code>. Each frame is 1440 by 900.</p>`);
+      const grid = el("div", "index-grid");
+      screens.forEach(([key, label, route]) => grid.append(el("a", "", `<strong>${label}</strong><br><span>${route}</span><br><code>${key}</code>`)));
+      index.append(grid);
+      app.append(index);
+    }
+  </script>
+</body>
+</html>

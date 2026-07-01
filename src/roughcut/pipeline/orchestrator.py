@@ -75,6 +75,20 @@ PIPELINE_STEPS = [
     "render",
 ]
 
+SMART_DIRECTOR_WORKFLOW_MODE = "smart_director"
+SMART_DIRECTOR_PIPELINE_STEPS = [
+    "director_brief",
+    "script_plan",
+    "storyboard_plan",
+    "asset_plan",
+    "asset_generation",
+    "voiceover_plan",
+    "music_plan",
+    "compose_plan",
+    "director_review",
+]
+ALL_PIPELINE_STEPS = [*PIPELINE_STEPS, *SMART_DIRECTOR_PIPELINE_STEPS]
+
 STEP_TASK_MAP = {
     "probe": "roughcut.pipeline.tasks.media_probe",
     "extract_audio": "roughcut.pipeline.tasks.media_extract_audio",
@@ -94,6 +108,15 @@ STEP_TASK_MAP = {
     "render_packaging_candidates": "roughcut.pipeline.tasks.media_render_packaging_candidates",
     "render_burn_in": "roughcut.pipeline.tasks.media_render_burn_in",
     "render": "roughcut.pipeline.tasks.media_render",
+    "director_brief": "roughcut.pipeline.tasks.llm_director_brief",
+    "script_plan": "roughcut.pipeline.tasks.llm_script_plan",
+    "storyboard_plan": "roughcut.pipeline.tasks.llm_storyboard_plan",
+    "asset_plan": "roughcut.pipeline.tasks.llm_asset_plan",
+    "asset_generation": "roughcut.pipeline.tasks.media_asset_generation",
+    "voiceover_plan": "roughcut.pipeline.tasks.llm_voiceover_plan",
+    "music_plan": "roughcut.pipeline.tasks.llm_music_plan",
+    "compose_plan": "roughcut.pipeline.tasks.llm_compose_plan",
+    "director_review": "roughcut.pipeline.tasks.llm_director_review",
 }
 
 STEP_QUEUES = {
@@ -115,6 +138,15 @@ STEP_QUEUES = {
     "render_packaging_candidates": "media_queue",
     "render_burn_in": "media_queue",
     "render": "media_queue",
+    "director_brief": "llm_queue",
+    "script_plan": "llm_queue",
+    "storyboard_plan": "llm_queue",
+    "asset_plan": "llm_queue",
+    "asset_generation": "media_queue",
+    "voiceover_plan": "llm_queue",
+    "music_plan": "llm_queue",
+    "compose_plan": "llm_queue",
+    "director_review": "llm_queue",
 }
 
 MAX_ATTEMPTS = 3
@@ -142,6 +174,15 @@ _EXPLICIT_STEP_PREREQUISITES: dict[str, tuple[str, ...]] = {
     "render_packaging_candidates": ("render_plain_base",),
     "render_burn_in": ("render_packaging_candidates",),
     "render": ("render_burn_in",),
+    "director_brief": (),
+    "script_plan": ("director_brief",),
+    "storyboard_plan": ("script_plan",),
+    "asset_plan": ("storyboard_plan",),
+    "asset_generation": ("asset_plan",),
+    "voiceover_plan": ("script_plan",),
+    "music_plan": ("script_plan",),
+    "compose_plan": ("asset_generation", "voiceover_plan", "music_plan"),
+    "director_review": ("compose_plan",),
 }
 _EXTERNAL_SCRIPT_FOOTAGE_WORKFLOW_MODES = {"remix_auto_commentary", "remix_llm_plan", "script_footage_remix"}
 _STREAMLINED_ASR_REVIEW_STEPS = frozenset(
@@ -1240,6 +1281,20 @@ def _job_uses_external_script_footage_remix(job: Job) -> bool:
     return str(getattr(job, "workflow_mode", "") or "").strip() in _EXTERNAL_SCRIPT_FOOTAGE_WORKFLOW_MODES
 
 
+def job_uses_smart_director_pipeline(job: Job) -> bool:
+    return str(getattr(job, "workflow_mode", "") or "").strip() == SMART_DIRECTOR_WORKFLOW_MODE
+
+
+def pipeline_steps_for_workflow_mode(workflow_mode: str | None) -> list[str]:
+    if str(workflow_mode or "").strip() == SMART_DIRECTOR_WORKFLOW_MODE:
+        return list(SMART_DIRECTOR_PIPELINE_STEPS)
+    return list(PIPELINE_STEPS)
+
+
+def pipeline_steps_for_job(job: Job) -> list[str]:
+    return pipeline_steps_for_workflow_mode(str(getattr(job, "workflow_mode", "") or ""))
+
+
 def _coerce_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -1338,7 +1393,9 @@ async def _is_step_ready(step: JobStep, session) -> bool:
     if step.step_name == "summary_review":
         return False
 
-    if step.step_name not in PIPELINE_STEPS:
+    job = await session.get(Job, step.job_id)
+    step_sequence = pipeline_steps_for_job(job) if job is not None else list(PIPELINE_STEPS)
+    if step.step_name not in step_sequence:
         logger.warning(
             "Ignoring unknown pipeline step while checking readiness job=%s step=%s status=%s",
             step.job_id,
@@ -1347,10 +1404,10 @@ async def _is_step_ready(step: JobStep, session) -> bool:
         )
         return False
 
-    step_idx = PIPELINE_STEPS.index(step.step_name)
+    step_idx = step_sequence.index(step.step_name)
     prerequisites = _EXPLICIT_STEP_PREREQUISITES.get(step.step_name)
     if prerequisites is None:
-        prerequisites = tuple(PIPELINE_STEPS[:step_idx])
+        prerequisites = tuple(step_sequence[:step_idx])
     if not prerequisites:
         return True  # First step is always ready
 
@@ -1433,9 +1490,10 @@ async def _update_job_statuses(session) -> None:
         step_map = {s.step_name: s for s in steps}
         _reconcile_completed_summary_review_step(step_map)
         await _reconcile_completed_render_step(session, job, step_map)
+        job_pipeline_steps = pipeline_steps_for_job(job)
         ordered_existing_steps = [
             step_map[name]
-            for name in PIPELINE_STEPS
+            for name in job_pipeline_steps
             if name in step_map
         ]
         _reconcile_terminal_steps(job, ordered_existing_steps)
@@ -1452,9 +1510,10 @@ async def _update_job_statuses(session) -> None:
             last_existing_step is not None and last_existing_step.status == "done"
         )
         if done_candidate:
-            quality_outcome = await _assess_and_maybe_rerun_job(session, job, steps)
-            if quality_outcome == "rerun":
-                continue
+            if not job_uses_smart_director_pipeline(job):
+                quality_outcome = await _assess_and_maybe_rerun_job(session, job, steps)
+                if quality_outcome == "rerun":
+                    continue
             job.status = "done"
             job.error_message = None
             job.updated_at = datetime.now(timezone.utc)
@@ -1538,7 +1597,8 @@ async def _update_job_statuses(session) -> None:
 
 def _latest_failed_step(steps: list[JobStep]) -> JobStep | None:
     step_map = {step.step_name: step for step in steps}
-    for step_name in reversed(PIPELINE_STEPS):
+    ordered_steps = [step for step in ALL_PIPELINE_STEPS if step in step_map]
+    for step_name in reversed(ordered_steps):
         step = step_map.get(step_name)
         if step is not None and _step_blocks_job_as_failure(step):
             return step
@@ -1547,7 +1607,8 @@ def _latest_failed_step(steps: list[JobStep]) -> JobStep | None:
 
 def _latest_cancelled_step(steps: list[JobStep]) -> JobStep | None:
     step_map = {step.step_name: step for step in steps}
-    for step_name in reversed(PIPELINE_STEPS):
+    ordered_steps = [step for step in ALL_PIPELINE_STEPS if step in step_map]
+    for step_name in reversed(ordered_steps):
         step = step_map.get(step_name)
         if step is not None and _step_blocks_job_as_cancellation(step):
             return step
@@ -1676,7 +1737,8 @@ async def _ensure_job_steps(job: Job, session) -> None:
     result = await session.execute(select(JobStep).where(JobStep.job_id == job.id))
     existing_steps = result.scalars().all()
     existing_names = {step.step_name for step in existing_steps}
-    missing_steps = [step_name for step_name in PIPELINE_STEPS if step_name not in existing_names]
+    expected_steps = pipeline_steps_for_job(job)
+    missing_steps = [step_name for step_name in expected_steps if step_name not in existing_names]
     if not missing_steps:
         return
     for step_name in missing_steps:
@@ -1685,9 +1747,10 @@ async def _ensure_job_steps(job: Job, session) -> None:
 
 
 def _find_previous_existing_step_name(step_name: str, existing_step_names: set[str]) -> str | None:
-    step_idx = PIPELINE_STEPS.index(step_name)
+    step_sequence = SMART_DIRECTOR_PIPELINE_STEPS if step_name in SMART_DIRECTOR_PIPELINE_STEPS else PIPELINE_STEPS
+    step_idx = step_sequence.index(step_name)
     for index in range(step_idx - 1, -1, -1):
-        candidate = PIPELINE_STEPS[index]
+        candidate = step_sequence[index]
         if candidate in existing_step_names:
             return candidate
     return None
@@ -2074,9 +2137,9 @@ async def run_orchestrator(poll_interval: float = 5.0) -> None:
         await lease.release()
 
 
-def create_job_steps(job_id: uuid.UUID) -> list[JobStep]:
+def create_job_steps(job_id: uuid.UUID, workflow_mode: str | None = None) -> list[JobStep]:
     """Create all pipeline steps for a new job."""
     return [
         JobStep(job_id=job_id, step_name=step_name, status="pending")
-        for step_name in PIPELINE_STEPS
+        for step_name in pipeline_steps_for_workflow_mode(workflow_mode)
     ]

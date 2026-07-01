@@ -4,9 +4,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from roughcut.media.output import _title_style_tokens
-
-
 DEFAULT_ASPECT_RATIO_TOLERANCE = 0.08
 
 
@@ -115,12 +112,6 @@ def assess_cover_publish_readiness(
                 target_size=target_size,
                 tolerance=aspect_ratio_tolerance,
             )
-            _check_overlay_layout_occupancy(
-                blocking_reasons,
-                warnings,
-                request=request,
-                canvas_size=image_dimensions,
-            )
     elif target_size is None:
         warnings.append("封面目标尺寸缺失，无法校验平台比例")
 
@@ -224,13 +215,13 @@ def _cover_payload_has_completion_evidence(payload: dict[str, Any] | None) -> bo
     for field in (
         "completed_at",
         "result_path",
-        "bitmap_title_contract_verified_at",
+        "legacy_bitmap_title_proof_verified_at",
         "bitmap_unexpected_text_checked_at",
         "compare_subject_contract_checked_at",
     ):
         if str(payload.get(field) or "").strip():
             return True
-    if bool(payload.get("post_title_overlay_applied")) or bool(payload.get("generated_by_codex_bridge")):
+    if bool(payload.get("generated_by_codex_bridge")):
         return True
     return False
 
@@ -383,13 +374,8 @@ def _check_cover_hard_contract(
         ((request.get("cover_director_policy") or {}) if isinstance(request.get("cover_director_policy"), dict) else {}).get("typography_owner")
         or ""
     ).strip().lower()
-    full_cover_typography_required = typography_owner in {"codex_full_cover", "bitmap_full_cover", "imagegen_full_cover"}
-    image_text_quality_is_blocking = (
-        typography_owner == "local_post_overlay"
-        or bool(contract.get("post_title_overlay_required"))
-        or bool(contract.get("full_bitmap_cover_required"))
-        or full_cover_typography_required
-    )
+    legacy_bitmap_title_proof_required = bool(contract.get("legacy_bitmap_title_proof_required"))
+    image_text_quality_is_blocking = legacy_bitmap_title_proof_required
     if bool(contract.get("preserve_subject_geometry")):
         deformation_risk = _positive_float(metadata.get("deformation_risk"))
         if deformation_risk is not None and deformation_risk > 0.35:
@@ -398,10 +384,6 @@ def _check_cover_hard_contract(
                 blocking_reasons.append(message)
             else:
                 warnings.append(message)
-    if typography_owner == "local_post_overlay" and not request.get("bitmap_unexpected_text_checked_at"):
-        blocking_reasons.append("封面位图额外文字校验未完成，不能放行到最终封面")
-    if typography_owner == "local_post_overlay" and bool(request.get("bitmap_unexpected_text_check_unavailable")):
-        blocking_reasons.append("封面位图额外文字校验未产出有效结论，不能放行到最终封面")
     if bool(contract.get("compare_subject_pair_required")) and not request.get("compare_subject_contract_checked_at"):
         if image_text_quality_is_blocking:
             blocking_reasons.append("对比封面双主体校验未完成，不能放行到最终封面")
@@ -412,15 +394,6 @@ def _check_cover_hard_contract(
             blocking_reasons.append("对比封面双主体校验未产出有效结论，不能放行到最终封面")
         else:
             warnings.append("对比封面双主体校验未产出有效结论，已降级为提示")
-    if typography_owner == "local_post_overlay" and bool(request.get("bitmap_unexpected_text_detected")):
-        detected_lines = request.get("bitmap_unexpected_text_detected_lines")
-        detected_text = ", ".join(
-            str(item).strip() for item in detected_lines if str(item).strip()
-        ) if isinstance(detected_lines, list) else ""
-        reason = str(request.get("bitmap_unexpected_text_reason") or "").strip()
-        suffix = f"：{detected_text}" if detected_text else ""
-        explanation = f"（{reason}）" if reason else ""
-        blocking_reasons.append(f"封面位图仍含额外可读文字或伪标题{suffix}{explanation}")
     if bool(contract.get("compare_subject_pair_required")) and request.get("compare_subject_contract_passed") is False:
         reason = str(request.get("compare_subject_contract_reason") or "").strip()
         explanation = f"：{reason}" if reason else ""
@@ -429,17 +402,15 @@ def _check_cover_hard_contract(
             blocking_reasons.append(message)
         else:
             warnings.append(message)
-    bitmap_title_verification_unavailable = bool(request.get("bitmap_title_contract_check_unavailable"))
-    actual_lines, title_contract_satisfied = _resolve_verified_cover_title_lines(request)
-    if bool(contract.get("post_title_overlay_required")) and not title_contract_satisfied:
-        blocking_reasons.append("封面标题后叠字未完成，不满足品牌/型号主标题与配置副标题硬合同")
-    if (bool(contract.get("full_bitmap_cover_required")) or full_cover_typography_required) and not bool(request.get("bitmap_title_contract_verified_at")):
+    bitmap_title_verification_unavailable = bool(request.get("legacy_bitmap_title_proof_check_unavailable"))
+    actual_lines, legacy_title_proof_satisfied = _resolve_verified_cover_title_lines(request)
+    if legacy_bitmap_title_proof_required and not bool(request.get("legacy_bitmap_title_proof_verified_at")):
         if image_text_quality_is_blocking:
             blocking_reasons.append("完整封面位图标题校验未完成，不能放行到最终封面")
         else:
             warnings.append("完整封面位图标题校验未完成，已降级为提示")
-    if (bool(contract.get("full_bitmap_cover_required")) or full_cover_typography_required) and request.get("bitmap_title_contract_passed") is False:
-        reason = str(request.get("bitmap_title_contract_reason") or "").strip()
+    if legacy_bitmap_title_proof_required and request.get("legacy_bitmap_title_proof_passed") is False:
+        reason = str(request.get("legacy_bitmap_title_proof_reason") or "").strip()
         explanation = f"：{reason}" if reason else ""
         message = f"完整封面位图标题不满足硬合同{explanation}"
         if image_text_quality_is_blocking:
@@ -447,8 +418,8 @@ def _check_cover_hard_contract(
         else:
             warnings.append(message)
     style_key = str(contract.get("unified_style_key") or "").strip()
-    if (bool(contract.get("full_bitmap_cover_required")) or full_cover_typography_required) and request.get("bitmap_title_contract_passed") is True:
-        reason = str(request.get("bitmap_title_contract_reason") or "").strip()
+    if legacy_bitmap_title_proof_required and request.get("legacy_bitmap_title_proof_passed") is True:
+        reason = str(request.get("legacy_bitmap_title_proof_reason") or "").strip()
         explanation = f"：{reason}" if reason else ""
         if bool(contract.get("brand_model_title_required")) and request.get("bitmap_title_main_title_matches") is False:
             blocking_reasons.append(f"完整封面位图主标题未通过识别校验{explanation}")
@@ -481,84 +452,16 @@ def _check_cover_hard_contract(
             blocking_reasons.append(message)
         else:
             warnings.append(message)
-    style_verified = bool(str(request.get("post_title_overlay_title_style") or "").strip()) or bool(request.get("bitmap_title_style_verified"))
+    style_verified = bool(request.get("bitmap_title_style_verified")) or not legacy_bitmap_title_proof_required
     if style_key and not style_verified:
         warnings.append(f"封面未记录标题风格校验，无法完全确认组内风格统一：style={style_key}")
-    if bool(contract.get("signature_stability_required")):
-        if not title_contract_satisfied or (required_top and actual_top != required_top) or (required_main and actual_main != required_main):
+    if legacy_bitmap_title_proof_required and bool(contract.get("signature_stability_required")):
+        if not legacy_title_proof_satisfied or (required_top and actual_top != required_top) or (required_main and actual_main != required_main):
             warnings.append("signature_stability_risk: cover title contract not locked")
-    if bitmap_title_verification_unavailable and (bool(contract.get("full_bitmap_cover_required")) or full_cover_typography_required):
+    if bitmap_title_verification_unavailable and legacy_bitmap_title_proof_required:
         blocking_reasons.append("完整封面位图标题校验未产出有效结论，不能放行到最终封面")
     elif bitmap_title_verification_unavailable:
-        warnings.append("bitmap_title_contract_verification_unavailable: cover accepted without OCR-style title proof")
-
-
-def _check_overlay_layout_occupancy(
-    blocking_reasons: list[str],
-    warnings: list[str],
-    *,
-    request: dict[str, Any],
-    canvas_size: dict[str, int] | None,
-) -> None:
-    if not isinstance(canvas_size, dict):
-        return
-    width = _positive_int(canvas_size.get("width"))
-    height = _positive_int(canvas_size.get("height"))
-    if not width or not height:
-        return
-    if not bool(request.get("post_title_overlay_applied")):
-        return
-    lines = request.get("post_title_overlay_lines") if isinstance(request.get("post_title_overlay_lines"), dict) else {}
-    if not lines:
-        return
-    title_style = str(request.get("post_title_overlay_title_style") or "").strip()
-    cover_style = str(request.get("post_title_overlay_group_style") or "").strip()
-    if not title_style:
-        return
-    try:
-        tokens = _title_style_tokens(
-            title_style,
-            title_lines={
-                "top": str(lines.get("top") or "").strip(),
-                "main": str(lines.get("main") or "").strip(),
-                "bottom": str(lines.get("bottom") or "").strip(),
-            },
-            cover_style=cover_style,
-        )
-    except Exception:
-        return
-    if not isinstance(tokens, dict):
-        return
-    top_ratio = _layout_font_ratio(tokens, "top", height)
-    main_ratio = _layout_font_ratio(tokens, "main", height)
-    bottom_ratio = _layout_font_ratio(tokens, "bottom", height)
-    total_ratio = top_ratio + main_ratio + bottom_ratio
-    main_width_ratio = _layout_safe_width_ratio(tokens, "main")
-    is_landscape = width > height
-    if main_ratio > 0.17 or total_ratio > 0.34:
-        blocking_reasons.append(
-            "封面后叠字占主体区域过大，当前标题层已压缩主体展示，不满足最终封面质量要求"
-        )
-        return
-    if is_landscape and main_ratio > 0.14 and main_width_ratio > 0.58:
-        blocking_reasons.append(
-            "横版封面主标题覆盖范围过宽，已影响主体对比信息展示"
-        )
-        return
-    if total_ratio > 0.28:
-        warnings.append("封面标题层占比偏高，建议进一步收紧字号或上移标题安全区")
-
-
-def _layout_font_ratio(tokens: dict[str, Any], key: str, height: int) -> float:
-    section = tokens.get(key) if isinstance(tokens.get(key), dict) else {}
-    size = _positive_float(section.get("size")) or 0.0
-    return size / max(float(height), 1.0)
-
-
-def _layout_safe_width_ratio(tokens: dict[str, Any], key: str) -> float:
-    section = tokens.get(key) if isinstance(tokens.get(key), dict) else {}
-    ratio = _positive_float(section.get("safe_width_ratio"))
-    return ratio if ratio is not None else 1.0
+        warnings.append("legacy_bitmap_title_proof_verification_unavailable: cover accepted without OCR-style title proof")
 
 
 def _resolve_verified_cover_title_lines(request: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -566,13 +469,8 @@ def _resolve_verified_cover_title_lines(request: dict[str, Any]) -> tuple[dict[s
         ((request.get("cover_director_policy") or {}) if isinstance(request.get("cover_director_policy"), dict) else {}).get("typography_owner")
         or ""
     ).strip().lower()
-    overlay_lines = request.get("post_title_overlay_lines") if isinstance(request.get("post_title_overlay_lines"), dict) else {}
-    if bool(request.get("post_title_overlay_applied")) and overlay_lines:
-        return overlay_lines, True
-    if typography_owner == "local_post_overlay":
-        return {}, False
     bitmap_lines = request.get("bitmap_title_lines") if isinstance(request.get("bitmap_title_lines"), dict) else {}
-    if bool(request.get("bitmap_title_contract_passed")) and bitmap_lines:
+    if bool(request.get("legacy_bitmap_title_proof_passed")) and bitmap_lines:
         contract = request.get("cover_hard_contract") if isinstance(request.get("cover_hard_contract"), dict) else {}
         if (
             bool(contract.get("brand_model_title_required"))
@@ -590,7 +488,7 @@ def _resolve_verified_cover_title_lines(request: dict[str, Any]) -> tuple[dict[s
         ):
             return {}, False
         return bitmap_lines, True
-    if bool(request.get("bitmap_title_contract_check_unavailable")):
+    if bool(request.get("legacy_bitmap_title_proof_check_unavailable")):
         fallback_lines = _extract_required_title_lines(request)
         if fallback_lines:
             return fallback_lines, False
@@ -690,3 +588,4 @@ def _read_image_dimensions(path: Path) -> tuple[int | None, int | None, str | No
 
 def _dedupe(items: list[str]) -> list[str]:
     return [item for item in dict.fromkeys(str(item).strip() for item in items) if item]
+

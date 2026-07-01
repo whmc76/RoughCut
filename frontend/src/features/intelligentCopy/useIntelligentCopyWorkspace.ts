@@ -13,6 +13,7 @@ import type {
   PublicationPlan,
   PublicationPlatformPublishOptions,
 } from "../../types";
+import { writeTextToClipboard } from "../../utils/clipboard";
 
 export type PublishPlatformOptionDraft = {
   scheduled_publish_at: string;
@@ -472,9 +473,18 @@ export function publicationPlanExecutorPreflightMessages(plan: PublicationPlan |
 }
 
 export function openManualHandoffTarget(target: ManualHandoffTarget | null | undefined): boolean {
-  const url = String(target?.login_url ?? "").trim();
+  const url = String(target?.manual_publish_entry_url ?? target?.login_url ?? "").trim();
   if (!url || typeof window === "undefined") return false;
-  window.open(url, "_blank", "noopener,noreferrer");
+  void api.openPublicationEntry({
+    url,
+    platform: target?.platform,
+    account_label: target?.account_label,
+    credential_ref: target?.credential_ref,
+    browser_profile_id: target?.browser_profile_id,
+    browser_binding: target?.browser_binding,
+  }).catch(() => {
+    window.open(url, "_blank", "popup=yes,width=1280,height=900,left=80,top=40,noopener,noreferrer");
+  });
   return true;
 }
 
@@ -909,10 +919,10 @@ export function useIntelligentCopyWorkspace() {
     if (!text.trim()) {
       return;
     }
-    try {
-      await navigator.clipboard.writeText(text);
+    const result = await writeTextToClipboard(text);
+    if (result.ok) {
       setCopyFeedback(successLabel);
-    } catch {
+    } else {
       setCopyFeedback("复制失败，请检查系统剪贴板权限。");
     }
     window.setTimeout(() => setCopyFeedback(""), 1800);

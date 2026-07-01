@@ -28,8 +28,10 @@ vi.mock("./api", () => ({
 
 vi.mock("./pages/OverviewPage", () => ({ OverviewPage: () => <main data-testid="route-overview">Overview route</main> }));
 vi.mock("./pages/JobsPage", () => ({ JobsPage: () => <main data-testid="route-jobs">Jobs route</main> }));
+vi.mock("./pages/FinalReviewPage", () => ({ FinalReviewPage: () => <main data-testid="route-final-review">Final review route</main> }));
 vi.mock("./pages/WatchRootsPage", () => ({ WatchRootsPage: () => <main data-testid="route-watch-roots">Watch roots route</main> }));
 vi.mock("./pages/IntelligentCopyPage", () => ({ IntelligentCopyPage: () => <main data-testid="route-intelligent-copy">Intelligent copy route</main> }));
+vi.mock("./pages/PublicationTrackingPage", () => ({ PublicationTrackingPage: () => <main data-testid="route-publication-tracking">Publication tracking route</main> }));
 vi.mock("./pages/ToolsPage", () => ({
   ToolsPage: () => <main data-testid="route-tools">Tools route</main>,
   TtsToolPage: () => <main data-testid="route-tools-tts">TTS route</main>,
@@ -40,16 +42,17 @@ vi.mock("./pages/CreatorCardsPage", () => ({ CreatorCardsPage: () => <main data-
 vi.mock("./pages/TaskStrategiesPage", () => ({ TaskStrategiesPage: () => <main data-testid="route-task-strategies">Task strategies route</main> }));
 vi.mock("./pages/VisualPlansPage", () => ({ VisualPlansPage: () => <main data-testid="route-visual-plans">Visual plans route</main> }));
 vi.mock("./pages/PublicationManagementPage", () => ({ PublicationManagementPage: () => <main data-testid="route-publication-management">Publication management route</main> }));
-vi.mock("./pages/MemoryPage", () => ({ MemoryPage: () => <main data-testid="route-memory">Memory route</main> }));
-vi.mock("./pages/GlossaryPage", () => ({ GlossaryPage: () => <main data-testid="route-glossary">Glossary route</main> }));
+vi.mock("./pages/TermsMemoryPage", () => ({ TermsMemoryPage: () => <main data-testid="route-terms-memory">Terms memory route</main> }));
 vi.mock("./pages/SettingsPage", () => ({ SettingsPage: () => <main data-testid="route-settings">Settings route</main> }));
 vi.mock("./pages/ControlPage", () => ({ ControlPage: () => <main data-testid="route-control">Control route</main> }));
 
 const routes = [
   ["/", "route-overview"],
   ["/jobs", "route-jobs"],
+  ["/final-review", "route-final-review"],
   ["/watch-roots", "route-watch-roots"],
   ["/intelligent-copy", "route-intelligent-copy"],
+  ["/publication-tracking", "route-publication-tracking"],
   ["/tools", "route-tools"],
   ["/tools/tts", "route-tools-tts"],
   ["/tools/asr", "route-tools-asr"],
@@ -58,8 +61,9 @@ const routes = [
   ["/task-strategies", "route-task-strategies"],
   ["/visual-plans", "route-visual-plans"],
   ["/publication-management", "route-publication-management"],
-  ["/memory", "route-memory"],
-  ["/glossary", "route-glossary"],
+  ["/terms-memory", "route-terms-memory"],
+  ["/memory", "route-terms-memory"],
+  ["/glossary", "route-terms-memory"],
   ["/settings", "route-settings"],
   ["/control", "route-control"],
 ] as const;
@@ -101,11 +105,11 @@ describe("App route and navigation audit", () => {
     renderApp();
 
     expect(await screen.findByText("Overview route")).toBeInTheDocument();
-    expect(screen.getByText("工作台")).toBeInTheDocument();
-    expect(screen.getByText("创作资产")).toBeInTheDocument();
+    expect(screen.getByText("工作流")).toBeInTheDocument();
+    expect(screen.getByText("资产库")).toBeInTheDocument();
     expect(screen.getByText("系统")).toBeInTheDocument();
 
-    for (const label of ["概览", "剪辑制片", "自动任务", "智能发布", "百宝箱", "创作者卡片库", "任务策略库", "智能视觉方案", "智能发布管理", "系统设置", "记忆", "术语表", "控制台"]) {
+    for (const label of ["概览", "制片队列", "成片审看", "发布跟踪", "创作者卡片", "任务策略", "视觉方案", "术语与记忆", "工具箱", "系统设置", "服务控制"]) {
       expect(screen.getByRole("link", { name: new RegExp(label) })).toBeInTheDocument();
     }
   });

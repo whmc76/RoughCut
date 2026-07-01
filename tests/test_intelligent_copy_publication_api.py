@@ -33,6 +33,7 @@ async def test_create_job_publication_material_task_forces_fresh_material_genera
     async def fake_create_generate_task(body):
         captured_body["folder_path"] = body.folder_path
         captured_body["platforms"] = list(body.platforms)
+        captured_body["platform_options"] = body.platform_options
         captured_body["use_existing_cover"] = body.use_existing_cover
         captured_body["creator_profile_id"] = body.creator_profile_id
         captured_body["force_regenerate"] = body.force_regenerate
@@ -51,7 +52,10 @@ async def test_create_job_publication_material_task_forces_fresh_material_genera
     monkeypatch.setattr(jobs_api, "_load_publication_inputs", fake_load_publication_inputs)
     monkeypatch.setattr(ic_api, "create_generate_task", fake_create_generate_task)
 
-    payload = jobs_api.PublicationSubmitIn(platforms=["douyin", "xiaohongshu"])
+    payload = jobs_api.PublicationSubmitIn(
+        platforms=["douyin", "xiaohongshu"],
+        platform_options={"xiaohongshu": {"topic": "EDC", "cover_ratio": "3:4"}},
+    )
 
     result = await jobs_api.create_job_publication_material_task(
         uuid.uuid4(),
@@ -64,10 +68,92 @@ async def test_create_job_publication_material_task_forces_fresh_material_genera
     assert captured_body == {
         "folder_path": "E:/rendered/out",
         "platforms": ["douyin", "xiaohongshu"],
+        "platform_options": {"xiaohongshu": {"topic": "EDC", "cover_ratio": "3:4"}},
         "use_existing_cover": False,
         "creator_profile_id": "creator-from-plan",
         "force_regenerate": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_create_generate_task_persists_and_schedules_platform_options(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_upsert_generation_task(task):
+        captured["task"] = task
+
+    def fake_schedule_generation_task(task_id, **kwargs):
+        captured["task_id"] = task_id
+        captured["schedule"] = kwargs
+
+    monkeypatch.setattr(
+        ic_api,
+        "inspect_intelligent_copy_folder",
+        lambda folder_path: {"folder_path": folder_path, "material_dir": f"{folder_path}/smart-copy"},
+    )
+    monkeypatch.setattr(ic_api, "_resolve_generation_creator_profile", lambda _profile_id: {"display_name": "FAS"})
+    monkeypatch.setattr(ic_api, "_find_active_generation_task", lambda **_kwargs: None)
+    monkeypatch.setattr(ic_api, "_upsert_generation_task", fake_upsert_generation_task)
+    monkeypatch.setattr(ic_api, "_schedule_generation_task", fake_schedule_generation_task)
+    monkeypatch.setattr(ic_api, "_get_generation_task", lambda _task_id: None)
+
+    body = ic_api.IntelligentCopyGenerateIn(
+        folder_path="E:/materials/demo",
+        platforms=["bilibili"],
+        platform_options={"bilibili": {"collection_name": "EDC刀光火工具集"}},
+        creator_profile_id="profile-1",
+        force_regenerate=True,
+    )
+
+    result = await ic_api.create_generate_task(body)
+
+    assert result["platform_options"] == {"bilibili": {"collection_name": "EDC刀光火工具集"}}
+    assert captured["task_id"] == result["id"]
+    assert captured["task"]["platform_options"] == {"bilibili": {"collection_name": "EDC刀光火工具集"}}
+    assert captured["schedule"]["platform_options"] == {"bilibili": {"collection_name": "EDC刀光火工具集"}}
+
+
+@pytest.mark.asyncio
+async def test_generation_task_runner_passes_platform_options_to_generator(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    patches: list[dict[str, object]] = []
+
+    async def fake_generate_intelligent_copy(folder_path, **kwargs):
+        captured["folder_path"] = folder_path
+        captured.update(kwargs)
+        return {
+            "status": "completed",
+            "folder_path": folder_path,
+            "material_dir": f"{folder_path}/smart-copy",
+            "inspection": {"folder_path": folder_path, "material_dir": f"{folder_path}/smart-copy"},
+            "platforms": [],
+            "material_contract": {"status": "passed", "one_click_publish_ready": True, "platforms": {}},
+            "material_generation_contract": {"status": "passed", "generation_ready": True},
+            "publish_ready": True,
+            "blocking_reasons": [],
+            "manual_handoff_ready": False,
+            "manual_handoff_targets": [],
+        }
+
+    monkeypatch.setattr(ic_api, "generate_intelligent_copy", fake_generate_intelligent_copy)
+    monkeypatch.setattr(ic_api, "_resolve_generation_creator_profile", lambda _profile_id: {"display_name": "FAS"})
+    monkeypatch.setattr(ic_api, "_patch_generation_task", lambda _task_id, patch: patches.append(patch) or patch)
+
+    await ic_api._run_generation_task(
+        "task-platform-options",
+        folder_path="E:/materials/demo",
+        copy_style=None,
+        platforms=["bilibili"],
+        platform_options={"bilibili": {"collection_name": "EDC刀光火工具集"}},
+        use_existing_cover=False,
+        force_regenerate=True,
+        creator_profile_id="profile-1",
+        creator_profile_name="FAS",
+    )
+
+    assert captured["folder_path"] == "E:/materials/demo"
+    assert captured["platform_options"] == {"bilibili": {"collection_name": "EDC刀光火工具集"}}
+    assert any(patch.get("status") == "completed" for patch in patches)
 
 
 @pytest.mark.asyncio
@@ -463,6 +549,93 @@ async def test_prepare_job_publication_materials_generates_without_submit(monkey
     assert result["status"] == "ready"
     assert result["material_generation"]["source"] == "job_one_click_publish"
     assert result["targets"] == [{"platform": "bilibili", "adapter": "browser_agent"}]
+
+
+@pytest.mark.asyncio
+async def test_prepare_job_publication_materials_force_regenerate_rewrites_existing_platform(monkeypatch) -> None:
+    job_id = "33333333-3333-3333-3333-333333333333"
+    load_calls = {"count": 0}
+    generated: dict[str, object] = {"called": False}
+
+    async def fake_load_publication_inputs(**_kwargs):
+        load_calls["count"] += 1
+        packaging = {
+            "platforms": {
+                "xiaohongshu": {
+                    "titles": ["旧小红书标题"],
+                    "description": "旧正文",
+                }
+            }
+        }
+        if load_calls["count"] > 1:
+            packaging = {
+                "platforms": {
+                    "xiaohongshu": {
+                        "titles": ["新小红书标题"],
+                        "description": "按小红书策略重写正文",
+                    }
+                }
+            }
+        return (
+            SimpleNamespace(id=job_id, status="done", source_path="", output_dir="E:/rendered"),
+            SimpleNamespace(output_path="E:/rendered/video.mp4"),
+            packaging,
+            {"id": "creator-1", "display_name": "Demo Creator"},
+        )
+
+    async def fake_generate_intelligent_copy(folder_path, **kwargs):
+        generated["called"] = True
+        generated["folder_path"] = str(folder_path).replace("\\", "/")
+        generated["platforms"] = kwargs["platforms"]
+        generated["force_regenerate"] = kwargs["force_regenerate"]
+        return {
+            "publish_ready": True,
+            "material_dir": "E:/rendered/smart-copy",
+            "platform_packaging_json_path": "E:/rendered/smart-copy/_meta/platform-packaging.json",
+            "blocking_reasons": [],
+        }
+
+    async def fake_list_attempts(*_args, **_kwargs):
+        return []
+
+    async def fake_resolve_options(**_kwargs):
+        return {}
+
+    def fake_build_plan(**kwargs):
+        package = kwargs["platform_packaging"]["platforms"]["xiaohongshu"]
+        return {
+            "status": "ready",
+            "publish_ready": True,
+            "material_targets": [
+                {
+                    "platform": "xiaohongshu",
+                    "title": package["titles"][0],
+                    "body": package["description"],
+                }
+            ],
+            "existing_attempts": kwargs["existing_attempts"],
+        }
+
+    monkeypatch.setattr(jobs_api, "_load_publication_inputs", fake_load_publication_inputs)
+    monkeypatch.setattr(jobs_api, "generate_intelligent_copy", fake_generate_intelligent_copy)
+    monkeypatch.setattr(jobs_api, "list_publication_attempts", fake_list_attempts)
+    monkeypatch.setattr(jobs_api, "_resolve_job_publication_platform_options", fake_resolve_options)
+    monkeypatch.setattr(jobs_api, "build_publication_plan", fake_build_plan)
+
+    result = await jobs_api.prepare_job_publication_materials(
+        job_id,
+        jobs_api.PublicationSubmitIn(platforms=["xiaohongshu"], force_regenerate=True),
+        session=_FakeSession(),
+    )
+
+    assert generated == {
+        "called": True,
+        "folder_path": "E:/rendered",
+        "platforms": ["xiaohongshu"],
+        "force_regenerate": True,
+    }
+    assert result["material_targets"][0]["title"] == "新小红书标题"
+    assert result["material_generation"]["source"] == "job_one_click_publish"
 
 
 def test_job_publication_packaging_generation_respects_requested_platforms() -> None:

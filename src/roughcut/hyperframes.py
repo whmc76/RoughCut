@@ -23,6 +23,7 @@ DEFAULT_HYPERFRAMES_OPTIONS = {key: True for key in HYPERFRAMES_OPTION_KEYS}
 DEFAULT_HYPERFRAMES_OPTIONS["progress_bar"] = False
 DEFAULT_HYPERFRAMES_SUBTITLE_STYLE = "keyword_highlight"
 DEFAULT_HYPERFRAMES_SUBTITLE_MOTION_STYLE = "motion_pop"
+SOCIAL_BUBBLE_TAG_STYLE = "social_bubble_tag"
 
 
 def normalize_options(value: dict[str, Any] | None) -> dict[str, bool]:
@@ -434,11 +435,12 @@ def _subtitle_emphasis_elements(
         unit_role = str(item.get("subtitle_unit_role") or "").strip().lower()
         if unit_role not in {"lead", "focus", "action"}:
             continue
-        text = "".join(subtitle_display_rule_text(item).split())[:14]
+        text = _subtitle_bubble_label_text(subtitle_display_rule_text(item))
         if not text:
             continue
         start = max(0.0, float(item.get("start_time") or 0.0))
         end = max(start + 0.55, float(item.get("end_time") or start + 0.9))
+        x, y = _subtitle_bubble_position(index, width=width, height=height)
         elements.append(
             text_element(
                 element_id=f"hf_subtitle_emphasis_{index:04d}",
@@ -446,13 +448,37 @@ def _subtitle_emphasis_elements(
                 start_sec=start,
                 end_sec=end,
                 text=text,
-                style="keyword_sticker",
+                style=SOCIAL_BUBBLE_TAG_STYLE,
                 layer=52,
-                position=(int(width * 0.5), int(height * 0.2)),
-                effects=[fade_in_out(90, 120), pop()],
+                position=(x, y),
+                effects=[fade_in_out(70, 130), pop(0.66, 1.14, 150), pulse(760)],
             )
         )
     return elements[:8]
+
+
+def _subtitle_bubble_label_text(raw: str) -> str:
+    text = "".join(str(raw or "").split())
+    text = text.strip("，。！？!?、,.；;：:\"'()（）[]【】<>《》")
+    if not text:
+        return ""
+    text = re.sub(r"^(你看|这里是|这里|直接|注意|重点|这个|一下)+", "", text)
+    text = text.strip("，。！？!?、,.；;：:\"'()（）[]【】<>《》")
+    if not text:
+        return ""
+    cjk_count = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return text[:8] if cjk_count else text[:14]
+
+
+def _subtitle_bubble_position(index: int, *, width: int, height: int) -> tuple[int, int]:
+    slots = (
+        (0.64, 0.16),
+        (0.34, 0.22),
+        (0.70, 0.27),
+        (0.42, 0.14),
+    )
+    x_ratio, y_ratio = slots[index % len(slots)]
+    return int(width * x_ratio), int(height * y_ratio)
 
 
 def _chapter_card_elements(

@@ -210,12 +210,12 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: Watermark,Microsoft YaHei,40,&HCCFFFFFF,&H000000FF,&H55000000,&H00000000,0,0,0,0,100,100,0,0,1,1.8,0,9,34,48,34,1
 Style: BigTitle,Microsoft YaHei,98,&H00EAF7FF,&H000000FF,&HAA183E5D,&H5A000000,1,0,0,0,100,100,0,0,1,6.4,1.8,7,100,100,140,1
 Style: BlueBanner,Microsoft YaHei,76,&H00FFFFFF,&H000000FF,&H7A103A75,&H00000000,1,0,0,0,100,100,0,0,1,3.8,1.4,5,96,96,70,1
-Style: Keyword,Microsoft YaHei,92,&H0000FFFF,&H000000FF,&HAA32003C,&H55000000,1,0,0,0,100,100,0,0,1,7.0,1.8,5,80,80,80,1
-Style: RedKeyword,Microsoft YaHei,92,&H00F4F4FF,&H000000FF,&HAA00006C,&H55000000,1,0,0,0,100,100,0,0,1,7.2,1.8,5,80,80,80,1
-Style: ImpactWord,Microsoft YaHei,116,&H000000FF,&H000000FF,&H00FFFFFF,&H7A000000,1,0,0,0,100,100,0,0,1,7.5,2.2,5,60,60,60,1
+Style: Keyword,Microsoft YaHei,86,&H00FFFFFF,&H000000FF,&HAA32003C,&H55000000,1,0,0,0,100,100,0,0,1,5.2,1.6,5,80,80,80,1
+Style: RedKeyword,Microsoft YaHei,86,&H00FFFFFF,&H000000FF,&HAA00006C,&H55000000,1,0,0,0,100,100,0,0,1,5.2,1.6,5,80,80,80,1
+Style: ImpactWord,Microsoft YaHei,68,&H00FFFFFF,&H000000FF,&HAA111318,&H66000000,1,0,0,0,100,100,0,0,1,4.8,1.5,5,60,60,60,1
 Style: Emphasis,Microsoft YaHei,76,&H0000F7FF,&H000000FF,&HAA1F003A,&H50000000,1,0,0,0,100,100,0,0,1,6.0,1.6,5,80,80,80,1
 Style: PulseChip,Microsoft YaHei,48,&H00FFFFFF,&H000000FF,&HAA16324B,&H33000000,1,0,0,0,100,100,0,0,1,3.6,1.2,5,60,60,60,1
-Style: BubbleText,Microsoft YaHei,64,&H00222531,&H000000FF,&H00FFFFFF,&H55000000,1,0,0,0,100,100,0,0,1,4.2,1.4,5,50,50,50,1
+Style: BubbleText,Microsoft YaHei,62,&H00222531,&H000000FF,&H00FFFFFF,&H55000000,1,0,0,0,100,100,0,0,1,3.4,1.2,5,50,50,50,1
 Style: SourceBridge,Microsoft YaHei,54,&H00FFFFFF,&H000000FF,&HAA111111,&H33000000,1,0,0,0,100,100,0,0,1,4.2,1.4,7,80,80,64,1
 
 [Events]
@@ -597,6 +597,7 @@ def build_reference_style_packaging_events(
         enter_x = text_x + (180 if x < width / 2 else -180)
         end = min(duration, start + 3.2)
         bubble_color = r"&H2DFBFF&" if index % 2 == 0 else r"&H75F2FF&"
+        display_phrase = f"#{phrase.lstrip('#')}"
         audio_cues.append({"time_sec": round(start + 0.06, 3), "kind": "keyword_pop", "label": phrase})
         events.append(
             ass_event(
@@ -604,7 +605,7 @@ def build_reference_style_packaging_events(
                 start,
                 end,
                 style,
-                rf"{{\p1\pos({x},{y + 8})\c{bubble_color}\alpha&H10&\bord3\3c&HFFFFFF&\shad2\fad(80,160)\t(0,160,\alpha&H00&)}}m -205 -72 l 205 -72 l 205 42 l 54 42 l 30 76 l 8 42 l -205 42",
+                rf"{{\p1\pos({x},{y + 8})\c{bubble_color}\alpha&H08&\bord3\3c&HFFFFFF&\shad2\fad(70,160)\t(0,160,\alpha&H00&)}}m -235 -54 l 188 -54 l 232 -18 l 232 35 l 194 58 l -218 58 l -250 25 l -250 -22",
             )
         )
         hyperframes_elements.append(
@@ -614,10 +615,10 @@ def build_reference_style_packaging_events(
                 start_sec=start,
                 end_sec=end,
                 shape="rounded_label",
-                style="keyword_speech_bubble",
+                style="social_bubble_plate",
                 layer=3,
                 position=(x, y + 8),
-                effects=[hyperframes.fade_in_out(80, 160), hyperframes.pop(0.85, 1.02, 160)],
+                effects=[hyperframes.fade_in_out(70, 160), hyperframes.pop(0.68, 1.1, 150), hyperframes.pulse(720)],
             )
         )
         events.append(
@@ -626,7 +627,7 @@ def build_reference_style_packaging_events(
                 start,
                 end,
                 "BubbleText",
-                rf"{{\move({enter_x},{text_y},{text_x},{text_y},0,170)\fad(70,160)\frz{(-4 if index % 2 == 0 else 3)}\fscx62\fscy62\t(0,160,\fscx118\fscy118)\t(160,310,\fscx100\fscy100)\t(1900,2600,\fscx108\fscy108)}}{escape_ass_text(phrase)}",
+                rf"{{\move({enter_x},{text_y},{text_x},{text_y},0,170)\fad(60,160)\frz{(-2 if index % 2 == 0 else 2)}\fscx64\fscy64\t(0,150,\fscx112\fscy112)\t(150,280,\fscx100\fscy100)\t(1850,2480,\fscx106\fscy106)}}{escape_ass_text(display_phrase)}",
             )
         )
         hyperframes_elements.append(
@@ -635,8 +636,8 @@ def build_reference_style_packaging_events(
                 track="keyword_stickers",
                 start_sec=start,
                 end_sec=end,
-                text=phrase,
-                style="keyword_text",
+                text=display_phrase,
+                style="social_bubble_text",
                 layer=4,
                 position=(text_x, text_y),
                 effects=[hyperframes.fade_in_out(70, 160), hyperframes.slide((enter_x, text_y), (text_x, text_y), 170), hyperframes.pulse(700)],
@@ -649,14 +650,38 @@ def build_reference_style_packaging_events(
         impact_end = min(duration, impact_start + 1.45)
         impact_x = 1340 if index % 2 == 0 else 640
         impact_y = 250 if index % 2 == 0 else 300
+        impact_display = f"#{impact_phrase.lstrip('#')}"
+        impact_bubble_color = r"&H9AFF4F&" if index % 2 == 0 else r"&HFF734A&"
         audio_cues.append({"time_sec": round(impact_start + 0.03, 3), "kind": "impact_hit", "label": phrase})
+        events.append(
+            ass_event(
+                4,
+                impact_start,
+                impact_end,
+                "ImpactWord",
+                rf"{{\p1\pos({impact_x},{impact_y + 6})\c{impact_bubble_color}\alpha&H0A&\bord3\3c&HFFFFFF&\shad2\fad(45,120)\t(0,120,\alpha&H00&)}}m -185 -45 l 154 -45 l 190 -15 l 190 29 l 158 49 l -170 49 l -205 18 l -205 -18",
+            )
+        )
+        hyperframes_elements.append(
+            hyperframes.shape_element(
+                element_id=f"impact_bubble_plate_{index + 1:03d}",
+                track="impact_words",
+                start_sec=impact_start,
+                end_sec=impact_end,
+                shape="rounded_label",
+                style="impact_bubble_plate",
+                layer=4,
+                position=(impact_x, impact_y + 6),
+                effects=[hyperframes.fade_in_out(45, 120), hyperframes.pop(0.62, 1.16, 120), hyperframes.pulse(520)],
+            )
+        )
         events.append(
             ass_event(
                 5,
                 impact_start,
                 impact_end,
                 "ImpactWord",
-                rf"{{\pos({impact_x},{impact_y})\fad(50,120)\frz{(-3 if index % 2 == 0 else 3)}\fscx58\fscy58\t(0,120,\fscx132\fscy132)\t(120,260,\fscx100\fscy100)\t(760,1120,\fscx108\fscy108)}}{escape_ass_text(impact_phrase)}",
+                rf"{{\pos({impact_x},{impact_y})\fad(45,120)\frz{(-2 if index % 2 == 0 else 2)}\fscx62\fscy62\t(0,120,\fscx118\fscy118)\t(120,260,\fscx100\fscy100)\t(760,1120,\fscx106\fscy106)}}{escape_ass_text(impact_display)}",
             )
         )
         hyperframes_elements.append(
@@ -665,11 +690,11 @@ def build_reference_style_packaging_events(
                 track="impact_words",
                 start_sec=impact_start,
                 end_sec=impact_end,
-                text=impact_phrase,
-                style="impact_word",
+                text=impact_display,
+                style="impact_bubble_text",
                 layer=5,
                 position=(impact_x, impact_y),
-                effects=[hyperframes.fade_in_out(50, 120), hyperframes.pop(0.58, 1.32, 120), hyperframes.pulse(540)],
+                effects=[hyperframes.fade_in_out(45, 120), hyperframes.pop(0.62, 1.18, 120), hyperframes.pulse(540)],
             )
         )
     if duration >= 30.0:

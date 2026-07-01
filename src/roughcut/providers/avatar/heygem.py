@@ -296,6 +296,12 @@ class HeyGemAvatarProvider(AvatarProvider):
                 ready_local_result_path = (
                     _wait_for_result_file_ready(local_result_path) if is_completed and local_result_path else None
                 )
+                if is_completed and ready_local_result_path:
+                    _cleanup_heygem_task_artifacts(
+                        task_code=task_code,
+                        result_value=result_value,
+                        preserved_paths=[ready_local_result_path],
+                    )
                 return {
                     "segment_id": segment.get("segment_id"),
                     "status": "success" if is_completed and ready_local_result_path else "failed",
@@ -639,7 +645,12 @@ def _resolve_or_collect_result_path(
 ) -> str | None:
     local_result = _resolve_local_result_path(result_value)
     if local_result and _local_video_duration_satisfies(local_result, min_duration_sec=min_duration_sec):
-        return local_result
+        collected = _copy_local_heygem_result_to_collected(
+            local_result,
+            task_code=task_code,
+            min_duration_sec=min_duration_sec,
+        )
+        return collected or local_result
     for attempt in range(_RESULT_READY_RETRIES):
         for container_path in _candidate_heygem_result_container_paths(result_value, task_code=task_code):
             collected = _collect_heygem_container_result(
@@ -725,6 +736,96 @@ def _collect_heygem_container_result(
     if not ready_path or not _local_video_duration_satisfies(ready_path, min_duration_sec=min_duration_sec):
         return None
     return ready_path
+
+
+def _copy_local_heygem_result_to_collected(
+    local_result: str,
+    *,
+    task_code: str | None = None,
+    min_duration_sec: float | None = None,
+) -> str | None:
+    source_path = Path(str(local_result or "")).expanduser()
+    if not source_path.exists():
+        return None
+    shared_root = _detect_shared_root()
+    if shared_root is None:
+        return None
+    try:
+        source_resolved = source_path.resolve()
+        shared_resolved = shared_root.resolve()
+        source_resolved.relative_to(shared_resolved)
+    except Exception:
+        return None
+
+    target_root = (shared_root / "result" / "roughcut_collected").resolve()
+    if _is_relative_to(source_resolved, target_root):
+        return str(source_resolved)
+
+    safe_task_code = _sanitize_stage_name(task_code or source_path.parent.name or "heygem_result")
+    suffix = source_path.suffix or ".mp4"
+    target_root.mkdir(parents=True, exist_ok=True)
+    target_path = target_root / f"{safe_task_code}_{source_path.stem or 'result'}{suffix}"
+    if source_resolved != target_path.resolve():
+        shutil.copy2(source_resolved, target_path)
+    ready_path = _wait_for_result_file_ready(str(target_path))
+    if not ready_path or not _local_video_duration_satisfies(ready_path, min_duration_sec=min_duration_sec):
+        return None
+    return ready_path
+
+
+def _cleanup_heygem_task_artifacts(
+    *,
+    task_code: str,
+    result_value: str | None = None,
+    preserved_paths: list[str] | tuple[str, ...] | None = None,
+) -> None:
+    shared_root = _detect_shared_root()
+    safe_task_code = _sanitize_stage_name(task_code)
+    if shared_root is None or not safe_task_code:
+        return
+    try:
+        shared_resolved = shared_root.resolve()
+    except Exception:
+        return
+    preserved: set[Path] = set()
+    for value in preserved_paths or []:
+        try:
+            preserved.add(Path(str(value)).expanduser().resolve())
+        except Exception:
+            continue
+
+    candidates: list[Path] = [
+        shared_root / "temp" / safe_task_code,
+        shared_root / f"{safe_task_code}-r.mp4",
+        shared_root / "result" / f"{safe_task_code}-r.mp4",
+    ]
+    local_result = _resolve_local_result_path(str(result_value or ""))
+    if local_result:
+        candidates.append(Path(local_result))
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser().resolve()
+            resolved.relative_to(shared_resolved)
+        except Exception:
+            continue
+        if resolved in preserved or any(_is_relative_to(keep, resolved) for keep in preserved):
+            continue
+        if _is_relative_to(resolved, (shared_root / "result" / "roughcut_collected").resolve()):
+            continue
+        if not (
+            _is_relative_to(resolved, (shared_root / "temp").resolve())
+            or _is_relative_to(resolved, (shared_root / "result").resolve())
+            or resolved.parent == shared_resolved
+        ):
+            continue
+        try:
+            if resolved.is_dir():
+                shutil.rmtree(resolved, ignore_errors=True)
+            else:
+                resolved.unlink(missing_ok=True)
+        except OSError:
+            continue
 
 
 def _resolve_completed_task_result(task_code: str) -> str | None:
@@ -1214,3 +1315,11 @@ def _sanitize_stage_name(value: str | None) -> str:
     if not raw:
         return ""
     return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in raw)[:48].strip("._")
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False

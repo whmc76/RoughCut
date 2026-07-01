@@ -34,6 +34,7 @@ from roughcut.publication_packaging import (
     derive_publication_cover_slots,
     filter_publication_packaging_platforms,
     load_publication_packaging_payload,
+    normalize_publication_packaging_payload,
 )
 from roughcut.publication_social_auto_upload import build_social_auto_upload_upload_command
 
@@ -337,6 +338,80 @@ async def test_list_publication_attempts_serializes_cover_contract(tmp_path):
 
     assert attempts[0]["cover_path"] == str(cover_path)
     assert attempts[0]["cover_slots"][0]["cover_path"] == str(cover_path)
+
+
+@pytest.mark.asyncio
+async def test_manual_publication_backfill_writes_job_bound_attempt(tmp_path):
+    media_path = tmp_path / "final.mp4"
+    cover_path = tmp_path / "cover.jpg"
+    media_path.write_bytes(b"video")
+    cover_path.write_bytes(b"cover")
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_factory() as session:
+        job = Job(id=uuid.uuid4(), source_path="source.mp4", source_name="source.mp4", status="done")
+        session.add(job)
+        await session.flush()
+        plan = publication.build_publication_plan(
+            job=job,
+            render_output=SimpleNamespace(output_path=str(media_path)),
+            platform_packaging={
+                "publish_ready": True,
+                "platforms": {
+                    "douyin": {
+                        "titles": ["真实作业发布标题"],
+                        "description": "真实作业发布正文",
+                        "tags": ["roughcut"],
+                        "cover_path": str(cover_path),
+                        "publish_ready": True,
+                    }
+                },
+            },
+            creator_profile={
+                "display_name": "主账号",
+                "creator_profile": {
+                    "publishing": {
+                        "platform_credentials": [
+                            {
+                                "platform": "douyin",
+                                "account_label": "主号",
+                                "credential_ref": "chrome-profile:main",
+                                "status": "logged_in",
+                                "enabled": True,
+                                "adapter": "browser_agent",
+                            }
+                        ]
+                    }
+                },
+            },
+            requested_platforms=["douyin"],
+            platform_options={},
+            existing_attempts=[],
+        )
+
+        attempt = await publication.backfill_manual_publication_attempt(
+            session,
+            plan=plan,
+            platform="douyin",
+            public_url="https://www.douyin.com/video/123",
+            receipt_id="receipt-123",
+            post_id="123",
+            creator_profile_id="profile-1",
+        )
+        await session.commit()
+        attempts = await publication.list_publication_attempts(session, job_id=str(job.id))
+
+    await engine.dispose()
+
+    assert attempt["job_id"] == str(job.id)
+    assert attempt["status"] == "published"
+    assert attempt["external_url"] == "https://www.douyin.com/video/123"
+    assert attempts[0]["id"] == attempt["id"]
+    assert attempts[0]["request_payload"]["title"] == "真实作业发布标题"
+    assert attempts[0]["external_receipt_id"] == "receipt-123"
 
 
 def test_normalize_publication_credentials_filters_to_browser_agent():
@@ -7123,6 +7198,96 @@ def test_publication_plan_defaults_to_stable_platforms_when_not_explicitly_reque
         "仅支持生成发布物料" in str(warning)
         for warning in plan["warnings"]
     )
+
+
+def test_publication_plan_material_targets_expose_platform_tag_copy(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging={
+            "platforms": {
+                "douyin": {
+                    "titles": ["抖音标题"],
+                    "description": "简介",
+                    "tags": ["EDC折刀", "开箱"],
+                },
+                "bilibili": {
+                    "titles": ["B站标题"],
+                    "description": "简介",
+                    "tags": ["EDC折刀", "开箱"],
+                },
+                "youtube": {
+                    "titles": ["YouTube标题"],
+                    "description": "简介",
+                    "tags": ["EDC折刀", "开箱"],
+                    "tags_copy": "EDC折刀, 开箱",
+                },
+            }
+        },
+        creator_profile={
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "douyin",
+                            "account_label": "抖音账号",
+                            "credential_ref": "chrome-profile:douyin",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        },
+                        {
+                            "platform": "bilibili",
+                            "account_label": "B站账号",
+                            "credential_ref": "chrome-profile:bilibili",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        },
+                        {
+                            "platform": "youtube",
+                            "account_label": "YouTube账号",
+                            "credential_ref": "chrome-profile:youtube",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        },
+                    ]
+                }
+            }
+        },
+        requested_platforms=["douyin", "bilibili", "youtube"],
+    )
+
+    material_by_platform = {target["platform"]: target for target in plan["material_targets"]}
+    assert material_by_platform["douyin"]["tags_copy"] == "#EDC折刀 #开箱"
+    assert material_by_platform["douyin"]["copy_material"]["tags_copy"] == "#EDC折刀 #开箱"
+    assert material_by_platform["bilibili"]["tags_copy"] == "EDC折刀, 开箱"
+    assert material_by_platform["youtube"]["tags_copy"] == "#EDC折刀 #开箱"
+
+
+def test_publication_packaging_normalization_preserves_generated_tag_copy():
+    packaging = normalize_publication_packaging_payload(
+        {
+            "platforms": [
+                {
+                    "key": "xiaohongshu",
+                    "titles": ["标题"],
+                    "body": "正文",
+                    "tags": ["开箱"],
+                    "tags_copy": "#开箱",
+                    "full_copy": "标题\n\n正文\n\n#开箱",
+                }
+            ]
+        }
+    )
+
+    assert packaging is not None
+    material = packaging["platforms"]["xiaohongshu"]
+    assert material["tags_copy"] == "#开箱"
+    assert material["full_copy"] == "标题\n\n正文\n\n#开箱"
 
 
 def test_publication_plan_blocks_material_only_platforms_from_auto_publish(tmp_path, monkeypatch):

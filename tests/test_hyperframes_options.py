@@ -47,6 +47,25 @@ def test_hyperframes_chapter_cards_render_as_bottom_chapter_pills() -> None:
     assert chapter_elements[0]["position"]["y"] >= 980
 
 
+def test_hyperframes_subtitle_emphasis_renders_as_social_bubble_tags() -> None:
+    plan = hyperframes.build_render_plan(
+        width=1920,
+        height=1080,
+        duration_sec=8.0,
+        subtitle_items=[
+            {"start_time": 0.4, "end_time": 1.2, "text_final": "你看这个快拆结构很明显", "subtitle_unit_role": "lead"},
+            {"start_time": 2.2, "end_time": 3.0, "text_final": "这里是锁定细节", "subtitle_unit_role": "focus"},
+        ],
+    )
+
+    emphasis_elements = [item for item in plan["elements"] if item.get("track") == "subtitle_emphasis"]
+
+    assert [item["style"] for item in emphasis_elements] == ["social_bubble_tag", "social_bubble_tag"]
+    assert [item["text"] for item in emphasis_elements] == ["快拆结构很明显", "锁定细节"]
+    assert emphasis_elements[0]["position"]["x"] != emphasis_elements[1]["position"]["x"]
+    assert any(effect.get("type") == "pulse" for effect in emphasis_elements[0]["effects"])
+
+
 def test_hyperframes_progress_bar_is_absent_until_selected() -> None:
     default_plan = hyperframes.build_render_plan(width=1920, height=1080, duration_sec=30.0)
     enabled_plan = hyperframes.build_render_plan(

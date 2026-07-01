@@ -13,11 +13,13 @@ from roughcut.pipeline.steps import (
     _AVATAR_FULL_TRACK_SLOT_TIMEOUT_SECONDS,
     AvatarFullTrackRenderError,
     _avatar_full_track_error_payload,
+    _avatar_full_track_failure_blocks_render,
     _avatar_full_track_file_fingerprint,
     _avatar_full_track_segment_cache_key,
     _avatar_full_track_segment_cache_path,
     _merge_render_runtime_result,
     _overlay_avatar_picture_in_picture,
+    _overlay_avatar_segments_picture_in_picture,
     _render_full_track_avatar_video,
     _resolve_avatar_full_track_busy_max_wait_seconds,
     _resolve_avatar_full_track_call_timeout_seconds,
@@ -101,6 +103,7 @@ async def test_overlay_avatar_picture_in_picture_limits_full_track_to_main_body(
         return SimpleNamespace(duration=0.0, width=0, height=0, fps=0.0)
 
     def fake_run(cmd, **_kwargs):
+        observed["cmd"] = " ".join(str(item) for item in cmd)
         observed["filter_complex"] = cmd[cmd.index("-filter_complex") + 1]
         output_path.write_bytes(b"output")
         return SimpleNamespace(returncode=0, stderr="")
@@ -128,6 +131,126 @@ async def test_overlay_avatar_picture_in_picture_limits_full_track_to_main_body(
     assert "enable='between(t,6.000000,106.000000)'" in filter_complex
     assert "setpts=PTS-STARTPTS+6.000000/TB" in filter_complex
     assert "trim=duration=100.000000" in filter_complex
+
+
+@pytest.mark.asyncio
+async def test_overlay_avatar_picture_in_picture_keeps_rounded_mask_for_long_full_track(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    base_path = tmp_path / "packaged.mp4"
+    avatar_path = tmp_path / "avatar.mp4"
+    output_path = tmp_path / "avatar_pip.mp4"
+    base_path.write_bytes(b"base")
+    avatar_path.write_bytes(b"avatar")
+    observed: dict[str, str] = {}
+
+    async def fake_probe(path: Path) -> SimpleNamespace:
+        if path == base_path:
+            return SimpleNamespace(duration=620.0, width=1920, height=1080, fps=30.0)
+        if path == avatar_path:
+            return SimpleNamespace(duration=620.0, width=512, height=512, fps=30.0)
+        return SimpleNamespace(duration=0.0, width=0, height=0, fps=0.0)
+
+    def fake_run(cmd, **_kwargs):
+        observed["cmd"] = " ".join(str(item) for item in cmd)
+        observed["filter_complex"] = cmd[cmd.index("-filter_complex") + 1]
+        output_path.write_bytes(b"output")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(pipeline_steps, "probe", fake_probe)
+    monkeypatch.setattr(pipeline_steps.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        pipeline_steps,
+        "get_settings",
+        lambda: SimpleNamespace(ffmpeg_timeout_sec=30),
+    )
+
+    await _overlay_avatar_picture_in_picture(
+        base_video_path=base_path,
+        avatar_video_path=avatar_path,
+        output_path=output_path,
+        position="bottom_right",
+        scale=0.22,
+        margin=28,
+        corner_radius=26,
+        border_width=4,
+    )
+
+    filter_complex = observed["filter_complex"]
+    assert "-loop 1" in observed["cmd"]
+    assert "avatar_pip_mask_" in observed["cmd"]
+    assert "alphamerge[pip]" in filter_complex
+    assert "geq=lum=" not in filter_complex
+    assert "overlay=4:4" not in filter_complex
+
+
+@pytest.mark.asyncio
+async def test_overlay_avatar_segments_picture_in_picture_uses_static_masks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    base_path = tmp_path / "packaged.mp4"
+    avatar_a_path = tmp_path / "avatar-a.mp4"
+    avatar_b_path = tmp_path / "avatar-b.mp4"
+    output_path = tmp_path / "avatar_segments_pip.mp4"
+    base_path.write_bytes(b"base")
+    avatar_a_path.write_bytes(b"avatar-a")
+    avatar_b_path.write_bytes(b"avatar-b")
+    observed: dict[str, str] = {}
+
+    async def fake_probe(path: Path) -> SimpleNamespace:
+        if path == base_path:
+            return SimpleNamespace(duration=20.0, width=1920, height=1080, fps=30.0)
+        if path in {avatar_a_path, avatar_b_path}:
+            return SimpleNamespace(duration=4.0, width=512, height=512, fps=30.0)
+        return SimpleNamespace(duration=0.0, width=0, height=0, fps=0.0)
+
+    def fake_run(cmd, **_kwargs):
+        observed["cmd"] = " ".join(str(item) for item in cmd)
+        observed["filter_complex"] = cmd[cmd.index("-filter_complex") + 1]
+        output_path.write_bytes(b"output")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(pipeline_steps, "probe", fake_probe)
+    monkeypatch.setattr(pipeline_steps.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        pipeline_steps,
+        "get_settings",
+        lambda: SimpleNamespace(ffmpeg_timeout_sec=30),
+    )
+
+    await _overlay_avatar_segments_picture_in_picture(
+        base_video_path=base_path,
+        avatar_segments=[
+            {
+                "video_local_path": str(avatar_a_path),
+                "start_time": 1.0,
+                "end_time": 3.0,
+                "duration_sec": 2.0,
+            },
+            {
+                "video_local_path": str(avatar_b_path),
+                "start_time": 5.0,
+                "end_time": 7.0,
+                "duration_sec": 2.0,
+            },
+        ],
+        output_path=output_path,
+        position="bottom_right",
+        scale=0.22,
+        margin=28,
+        corner_radius=26,
+        border_width=4,
+    )
+
+    filter_complex = observed["filter_complex"]
+    assert observed["cmd"].count("-loop 1") == 2
+    assert "split=2[pipfgmasksrc1][pipfgmasksrc2]" in filter_complex
+    assert "split=2[pipbgmasksrc1][pipbgmasksrc2]" in filter_complex
+    assert "alphamerge[pipfg1]" in filter_complex
+    assert "alphamerge[pipbg1]" in filter_complex
+    assert "geq=lum=" not in filter_complex
 
 
 def test_resolve_avatar_full_track_slot_timeout_parses_and_clamps(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,6 +379,12 @@ def test_avatar_full_track_error_payload_preserves_reason_and_metadata() -> None
         "retryable": True,
         "error_metadata": {"call_timeout_seconds": 45.0},
     }
+
+
+def test_avatar_full_track_failure_degrades_by_default_for_legacy_plans() -> None:
+    assert _avatar_full_track_failure_blocks_render({"mode": "full_track_audio_passthrough"}) is False
+    assert _avatar_full_track_failure_blocks_render({"allow_plain_fallback": True}) is False
+    assert _avatar_full_track_failure_blocks_render({"allow_plain_fallback": False}) is True
 
 
 def test_merge_render_runtime_result_clears_stale_error_fields_after_success() -> None:

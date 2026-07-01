@@ -6,6 +6,7 @@ import type {
   IntelligentCopyPathSuggestResponse,
   IntelligentCopyResult,
   PublicationIntelligenceScheme,
+  PublicationAttempt,
   PublicationAttemptList,
   PublicationPlan,
   PublicationPlatformPublishOptions,
@@ -107,6 +108,18 @@ export const intelligentCopyApi = {
     if (creatorProfileId) params.set("creator_profile_id", creatorProfileId);
     return request<PublicationAttemptList>(`/intelligent-copy/publication/attempts/recent?${params.toString()}`);
   },
+  backfillManualPublicationResult: (body: {
+    folder_path: string;
+    creator_profile_id?: string | null;
+    platform: string;
+    public_url?: string | null;
+    receipt_id?: string | null;
+    post_id?: string | null;
+  }) =>
+    request<PublicationAttempt>("/intelligent-copy/publication/manual-result", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   publishIntelligentFolder: (
     folderPath: string,
     body: {

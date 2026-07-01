@@ -140,17 +140,36 @@ def build_capability_orchestration_payload(
     if str(effective_controls.get("material_usage") or "").strip() == MATERIAL_USAGE_MAIN_ONLY:
         capabilities["local_broll_insert"] = "disabled"
         capabilities["local_audio_cues"] = "disabled"
+        capabilities["stock_footage_retrieval"] = "disabled"
+        capabilities["generative_scene_plan"] = "disabled"
+        capabilities["soundtrack_audio_mix"] = "disabled"
         capabilities["multi_material_assembly"] = "disabled"
     elif str(effective_controls.get("material_usage") or "").strip() == MATERIAL_USAGE_SELECTED_UPLOADED:
         if capabilities["local_broll_insert"] == "auto_apply":
             capabilities["local_broll_insert"] = "suggest"
         if capabilities["local_audio_cues"] == "auto_apply":
             capabilities["local_audio_cues"] = "suggest"
+        if capabilities["stock_footage_retrieval"] == "auto_apply":
+            capabilities["stock_footage_retrieval"] = "suggest"
+        if capabilities["generative_scene_plan"] == "auto_apply":
+            capabilities["generative_scene_plan"] = "suggest"
+        if capabilities["soundtrack_audio_mix"] == "auto_apply":
+            capabilities["soundtrack_audio_mix"] = "suggest"
         if capabilities["multi_material_assembly"] != "disabled":
             capabilities["multi_material_assembly"] = "manual_required"
 
     if str(effective_controls.get("automation_level") or "").strip() == AUTOMATION_LEVEL_CONSERVATIVE:
-        for key in ("screen_focus", "chapter_cards", "highlight_window_selection", "local_broll_insert", "local_audio_cues"):
+        for key in (
+            "reference_style_analysis",
+            "screen_focus",
+            "chapter_cards",
+            "stock_footage_retrieval",
+            "generative_scene_plan",
+            "highlight_window_selection",
+            "local_broll_insert",
+            "local_audio_cues",
+            "soundtrack_audio_mix",
+        ):
             if capabilities[key] == "auto_apply":
                 capabilities[key] = "suggest"
         if capabilities["multi_material_assembly"] == "auto_apply":

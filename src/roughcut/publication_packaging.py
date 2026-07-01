@@ -485,6 +485,12 @@ def normalize_publication_packaging_payload(
             entry["body"] = body
         if tags:
             entry["tags"] = tags
+        tags_copy = str(item.get("tags_copy") or "").strip()
+        if tags_copy:
+            entry["tags_copy"] = tags_copy
+        full_copy = str(item.get("full_copy") or "").strip()
+        if full_copy:
+            entry["full_copy"] = full_copy
         if cover_path:
             entry["cover_path"] = cover_path
         if isinstance(item.get("cover_generation"), dict) and item.get("cover_generation"):

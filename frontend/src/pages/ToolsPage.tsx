@@ -100,7 +100,7 @@ const cosyVoiceTtsModes = [
     label: "instruct2",
     name: "指令口播",
     summary: "用 instruct_text 控制语言、方言、情绪、语速或音量。",
-    useCase: "推荐：最适合百宝箱试音、口播风格和数字人配音。",
+    useCase: "推荐：最适合工具箱试音、口播风格和数字人配音。",
     detail: "需要 prompt_wav/reference_audio；只填写想要的口播指令，官方分隔符由后台自动补齐。",
     recommended: true,
   },
@@ -351,7 +351,7 @@ type AvatarToolOptions = {
   script: string;
 };
 
-const defaultTtsText = "这是一段 RoughCut 百宝箱页面的 CosyVoice3 试音。";
+const defaultTtsText = "这是一段 RoughCut 工具箱页面的 CosyVoice3 试音。";
 const defaultInstructTextPreset = instructTextPresetGroups[0]?.presets[0]?.text ?? "";
 
 const defaultTtsOptions: TtsToolOptions = {
@@ -793,9 +793,9 @@ export function ToolsPage() {
   return (
     <section className="page-stack tools-page">
       <PageHeader
-        eyebrow="Tools"
-        title="百宝箱"
-        description="直连调试 TTS、ASR 和数字人口播服务。"
+        eyebrow="系统"
+        title="工具箱"
+        description="验证 ASR、TTS 和数字人口播服务，并执行单次调试。"
         summary={[
           { label: "TTS", value: "CosyVoice3 Docker", detail: "用于文本到语音和音色参考测试" },
           { label: "ASR", value: "当前本地 ASR", detail: "用于转写音视频素材" },
@@ -850,7 +850,7 @@ function ToolStatusCard({ status }: { status?: ToolServiceStatus }) {
 function ToolNav({ statuses }: { statuses?: ToolStatusMap }) {
   const location = useLocation();
   return (
-    <div className="tool-tabs" role="tablist" aria-label="百宝箱工具页签">
+    <div className="tool-tabs" role="tablist" aria-label="工具箱工具页签">
       {toolCards.map((tool) => (
         <Link
           key={tool.key}
@@ -874,7 +874,7 @@ function ToolPageChrome({ statuses }: { statuses?: ToolStatusMap }) {
     <div className="tool-page-chrome">
       <ToolNav statuses={statuses} />
       <Link className="button ghost tool-page-back" to="/tools">
-        返回百宝箱
+        返回工具箱
       </Link>
     </div>
   );

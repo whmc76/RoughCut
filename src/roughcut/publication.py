@@ -347,6 +347,10 @@ def _publication_auto_publish_disabled_message(platform: str) -> str:
     return f"{platform_label(platform)}：{reason}"
 
 
+def _publication_platform_entry_url(platform: str) -> str:
+    return platform_manual_publish_entry_url(platform) or platform_publish_entry_url(platform)
+
+
 def _build_publication_material_targets(
     *,
     packages: dict[str, dict[str, Any]],
@@ -377,6 +381,7 @@ def _build_publication_material_targets(
             _package_primary_title(package),
             _publication_title_hard_limit(platform, {}),
         )
+        tags_copy = _publication_package_tags_copy(package, platform=platform)
         copy_material = dict(package.get("copy_material")) if isinstance(package.get("copy_material"), dict) else {}
         contract = platform_content_contract(platform)
         has_title = _publication_package_requires_title(platform, package)
@@ -412,6 +417,7 @@ def _build_publication_material_targets(
                 "titles": titles,
                 "body": body,
                 "tags": tags,
+                "tags_copy": tags_copy,
                 "cover_path": primary_cover_path,
                 "cover_slots": [dict(item) for item in cover_slots],
                 "full_copy": str(package.get("full_copy") or "").strip(),
@@ -451,6 +457,7 @@ def _build_publication_material_targets(
                 "description": body,
                 "declaration": str(package.get("declaration") or "").strip() or platform_default_declaration(platform),
                 "tags": tags,
+                "tags_copy": tags_copy,
                 "cover_path": primary_cover_path,
                 "cover_slots": [dict(item) for item in cover_slots],
                 "full_copy": str(package.get("full_copy") or "").strip(),
@@ -465,11 +472,33 @@ def _build_publication_material_targets(
                     if isinstance(package.get("platform_specific_overrides"), dict)
                     else {}
                 ),
-                "manual_publish_entry_url": platform_manual_publish_entry_url(platform),
+                "manual_publish_entry_url": _publication_platform_entry_url(platform),
                 "status": "material_ready",
             }
         )
     return material_targets
+
+
+def _publication_package_tags_copy(package: dict[str, Any], *, platform: str) -> str:
+    normalized_platform = normalize_publication_platform(platform)
+    explicit = str(package.get("tags_copy") or "").strip()
+    if explicit and (normalized_platform == "bilibili" or "#" in explicit):
+        return explicit
+    copy_material = package.get("copy_material") if isinstance(package.get("copy_material"), dict) else {}
+    material_copy = str(copy_material.get("tags_copy") or "").strip()
+    if material_copy and (normalized_platform == "bilibili" or "#" in material_copy):
+        return material_copy
+    tags = [str(item).strip().lstrip("#") for item in (package.get("tags") or []) if str(item).strip()]
+    if not tags:
+        return ""
+    if normalized_platform != "bilibili":
+        return " ".join(tag if tag.startswith("#") else f"#{tag}" for tag in tags)
+    constraints = package.get("constraints") if isinstance(package.get("constraints"), dict) else {}
+    contract = platform_content_contract(platform)
+    tag_style = str(constraints.get("tag_style") or contract.get("tag_style") or "").strip()
+    if tag_style == "hashtags_space":
+        return " ".join(tag if tag.startswith("#") else f"#{tag}" for tag in tags)
+    return ", ".join(tags)
 
 
 def _normalize_publication_browser_path(value: Any) -> str | None:
@@ -1450,6 +1479,7 @@ def build_publication_plan(
                 "titles": [str(item).strip() for item in (package.get("titles") or []) if str(item).strip()],
                 "body": str(package.get("description") or package.get("body") or "").strip(),
                 "tags": [str(item).strip() for item in (package.get("tags") or []) if str(item).strip()],
+                "tags_copy": _publication_package_tags_copy(package, platform=platform),
                 "cover_path": primary_cover_path,
                 "cover_slots": [dict(item) for item in cover_slots],
                 "declaration": declaration,
@@ -1475,7 +1505,7 @@ def build_publication_plan(
             continue
         if platform_manual_handoff_only(platform):
             reason = platform_manual_publish_reason(platform) or "当前平台仅支持人工登录后继续发布。"
-            entry_url = platform_manual_publish_entry_url(platform)
+            entry_url = _publication_platform_entry_url(platform)
             manual_handoff_reasons.append(f"{platform_label(platform)}：{reason}")
             warnings.append(
                 f"{platform_label(platform)} 已切换为人工接管平台：{reason}"
@@ -1507,6 +1537,7 @@ def build_publication_plan(
                     "body": str(package.get("description") or package.get("body") or "").strip(),
                     "declaration": declaration,
                     "tags": [str(item).strip() for item in (package.get("tags") or []) if str(item).strip()],
+                    "tags_copy": _publication_package_tags_copy(package, platform=platform),
                     "titles": [str(item).strip() for item in (package.get("titles") or []) if str(item).strip()],
                     "description": str(package.get("description") or package.get("body") or "").strip(),
                     "cover_path": primary_cover_path,
@@ -1572,6 +1603,7 @@ def build_publication_plan(
                 "body": str(package.get("description") or package.get("body") or "").strip(),
                 "declaration": declaration,
                 "tags": [str(item).strip() for item in (package.get("tags") or []) if str(item).strip()],
+                "tags_copy": _publication_package_tags_copy(package, platform=platform),
                 "titles": [str(item).strip() for item in (package.get("titles") or []) if str(item).strip()],
                 "description": str(package.get("description") or package.get("body") or "").strip(),
                 "cover_path": primary_cover_path,
@@ -1584,7 +1616,7 @@ def build_publication_plan(
                 "visibility_or_publish_mode": visibility_or_publish_mode,
                 "scheduled_publish_at": scheduled_publish_at,
                 "platform_specific_overrides": merged_platform_overrides,
-                "manual_publish_entry_url": platform_manual_publish_entry_url(platform),
+                "manual_publish_entry_url": _publication_platform_entry_url(platform),
                 "status": "ready",
             }
         )
@@ -3737,6 +3769,142 @@ def serialize_publication_attempt_run(run: PublicationAttemptRun) -> dict[str, A
         "created_at": _iso_or_none(run.created_at),
         "updated_at": _iso_or_none(run.updated_at),
     }
+
+
+def find_publication_plan_target(plan: dict[str, Any], platform: str) -> dict[str, Any]:
+    normalized = normalize_publication_platform(platform)
+    for collection_name in ("targets", "material_targets"):
+        for target in plan.get(collection_name) or []:
+            if normalize_publication_platform((target or {}).get("platform")) == normalized:
+                return dict(target or {})
+    return {"platform": normalized, "platform_label": normalized}
+
+
+def build_manual_publication_request_payload(
+    *,
+    plan: dict[str, Any],
+    target: dict[str, Any],
+    platform: str,
+    public_url: str,
+    receipt_id: str,
+    post_id: str,
+) -> dict[str, Any]:
+    tags = target.get("tags") if isinstance(target.get("tags"), list) else []
+    return {
+        "manual_publication": True,
+        "job_id": str(plan.get("job_id") or ""),
+        "media_path": str(plan.get("media_path") or ""),
+        "platform": str(target.get("platform") or platform),
+        "platform_label": str(target.get("platform_label") or target.get("label") or platform),
+        "title": str(target.get("title") or ""),
+        "titles": target.get("titles") if isinstance(target.get("titles"), list) else [],
+        "body": str(target.get("body") or target.get("description") or ""),
+        "description": str(target.get("description") or target.get("body") or ""),
+        "tags": [str(item).strip().lstrip("#") for item in tags if str(item).strip()],
+        "cover_path": str(target.get("cover_path") or ""),
+        "cover_slots": target.get("cover_slots") if isinstance(target.get("cover_slots"), list) else [],
+        "manual_result": {
+            "public_url": public_url or None,
+            "receipt_id": receipt_id or None,
+            "post_id": post_id or None,
+        },
+    }
+
+
+async def backfill_manual_publication_attempt(
+    session: AsyncSession,
+    *,
+    plan: dict[str, Any],
+    platform: str,
+    public_url: str,
+    receipt_id: str,
+    post_id: str,
+    creator_profile_id: str | None = None,
+) -> dict[str, Any]:
+    normalized_platform = normalize_publication_platform(platform)
+    if not normalized_platform:
+        raise ValueError("缺少发布平台。")
+    if not public_url and not receipt_id:
+        raise ValueError("请至少填写公开视频链接或回执 ID。")
+
+    target = find_publication_plan_target(plan, normalized_platform)
+    job_id = uuid.UUID(str(plan.get("job_id") or ""))
+    existing_stmt = (
+        select(PublicationAttempt)
+        .where(PublicationAttempt.job_id == job_id)
+        .where(PublicationAttempt.platform == normalized_platform)
+        .order_by(PublicationAttempt.updated_at.desc(), PublicationAttempt.created_at.desc())
+        .limit(1)
+    )
+    existing_row = await session.execute(existing_stmt)
+    attempt = existing_row.scalars().first()
+    now = datetime.now(timezone.utc)
+    request_payload = build_manual_publication_request_payload(
+        plan=plan,
+        target=target,
+        platform=normalized_platform,
+        public_url=public_url,
+        receipt_id=receipt_id,
+        post_id=post_id,
+    )
+    if attempt is None:
+        attempt_id = str(uuid.uuid4())
+        attempt = PublicationAttempt(
+            id=attempt_id,
+            content_id=str(plan.get("job_id") or job_id),
+            job_id=job_id,
+            creator_profile_id=str(plan.get("creator_profile_id") or creator_profile_id or ""),
+            creator_profile_name=str(plan.get("creator_profile_name") or ""),
+            platform=normalized_platform,
+            platform_label=str(target.get("platform_label") or target.get("label") or normalized_platform),
+            account_label=str(target.get("account_label") or ""),
+            credential_id=str(target.get("credential_id") or ""),
+            idempotency_key=f"manual:{job_id}:{normalized_platform}",
+            semantic_fingerprint=f"manual:{job_id}:{normalized_platform}:{str(target.get('title') or '')}",
+            adapter="manual",
+            status="published" if public_url or receipt_id else "needs_human",
+            run_status="manual_backfilled",
+            attempt_number=1,
+            retry_count=0,
+            max_retries=0,
+            request_payload=request_payload,
+            response_payload={},
+            execution_mode="manual",
+            content_kind="video",
+            submitted_at=now,
+            published_at=now if public_url or receipt_id else None,
+            operator_summary="人工发布结果已回填。" if public_url else "人工发布回执已回填，等待公开视频链接。",
+        )
+        session.add(attempt)
+    else:
+        attempt.request_payload = {**(attempt.request_payload or {}), **request_payload}
+        attempt.status = "published" if public_url or receipt_id else "needs_human"
+        attempt.run_status = "manual_backfilled"
+        attempt.execution_mode = "manual"
+        attempt.adapter = attempt.adapter or "manual"
+        attempt.submitted_at = attempt.submitted_at or now
+        attempt.published_at = attempt.published_at or now
+        attempt.error_code = None
+        attempt.error_message = None
+        attempt.operator_summary = "人工发布结果已回填。" if public_url else "人工发布回执已回填，等待公开视频链接。"
+    if public_url:
+        attempt.external_url = public_url
+    if receipt_id:
+        attempt.external_receipt_id = receipt_id
+    if post_id:
+        attempt.external_post_id = post_id
+    attempt.response_payload = {
+        **(attempt.response_payload or {}),
+        "manual_backfill": {
+            "public_url": public_url or None,
+            "receipt_id": receipt_id or None,
+            "post_id": post_id or None,
+            "updated_at": now.isoformat(),
+        },
+    }
+    await session.flush()
+    await session.refresh(attempt)
+    return serialize_publication_attempt(attempt, runs=[])
 
 
 def now_iso() -> str:

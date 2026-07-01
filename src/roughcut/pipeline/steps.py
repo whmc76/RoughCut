@@ -51,6 +51,18 @@ from roughcut.creative import (
     multilingual_translation_mode_enabled,
 )
 from roughcut.creative.avatar import refine_avatar_commentary_segments_for_media_duration
+from roughcut.creative.smart_director import (
+    SMART_DIRECTOR_ARTIFACT_TYPES,
+    build_smart_director_asset_plan,
+    build_smart_director_brief,
+    build_smart_director_compose_plan,
+    build_smart_director_music_plan,
+    build_smart_director_review,
+    build_smart_director_script_plan,
+    build_smart_director_storyboard_plan,
+    build_smart_director_voiceover_plan,
+    smart_director_artifact_fingerprint,
+)
 from roughcut.docker_gpu_guard import _acquire_operation_lock, _release_operation_lock
 from roughcut.db.models import (
     Artifact,
@@ -176,6 +188,7 @@ from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import _apply_packaging_plan, burn_subtitles_on_rendered_video, render_video
 from roughcut.media.silence import detect_silence
+from roughcut.providers.asset_generation import generate_smart_director_assets
 from roughcut.llm_cache import (
     build_cache_key,
     build_cache_metadata,
@@ -193,6 +206,7 @@ from roughcut.production_readiness import (
 )
 from roughcut.review.intelligent_copy import generate_intelligent_copy
 from roughcut.packaging.library import (
+    DEFAULT_CONFIG as DEFAULT_PACKAGING_CONFIG,
     list_packaging_assets,
     resolve_insert_added_duration,
     resolve_insert_effective_duration,
@@ -353,7 +367,7 @@ _MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE = "manual_editor_draft"
 
 _AVATAR_SEGMENT_READY_RETRIES = 60
 _AVATAR_SEGMENT_READY_RETRY_SECONDS = 1.0
-_RENDER_STAGE_CONTRACT_VERSION = "render_stage_contract.v8.enhanced_body_only_bookends"
+_RENDER_STAGE_CONTRACT_VERSION = "render_stage_contract.v9.asr_repaired_packaged_tail"
 _RENDER_ENHANCEMENT_MODES = {
     "ai_effects",
     "dialogue_polish",
@@ -384,6 +398,15 @@ STEP_LABELS = {
     "render_packaging_candidates": "渲染包装候选片",
     "render_burn_in": "渲染字幕烧录版",
     "render": "渲染输出",
+    "director_brief": "导演简报",
+    "script_plan": "脚本规划",
+    "storyboard_plan": "分镜规划",
+    "asset_plan": "素材规划",
+    "asset_generation": "素材生成",
+    "voiceover_plan": "配音规划",
+    "music_plan": "音乐规划",
+    "compose_plan": "合成规划",
+    "director_review": "导演复核",
 }
 
 _RENDER_PHASE_BY_STEP = {
@@ -11458,7 +11481,9 @@ async def run_render(job_id: str, *, step_name: str = "render") -> dict:
             packaged_outro_duration_for_subtitles = await _resolve_packaging_trailing_gap_allowance(
                 outro_plan=packaged_outro_plan_for_subtitles,
             )
-            if packaged_outro_duration_for_subtitles > 0:
+            if packaged_outro_duration_for_subtitles > 0 and not _render_alignment_uses_rendered_audio_timing(
+                final_candidate_alignment
+            ):
                 packaged_subtitles = _bound_render_subtitles_to_packaged_content_window(
                     packaged_subtitles,
                     content_end_sec=max(
@@ -11482,7 +11507,9 @@ async def run_render(job_id: str, *, step_name: str = "render") -> dict:
                     == str((ai_effect_outro_plan_for_subtitles or {}).get("path") or "").strip()
                     else await _resolve_packaging_trailing_gap_allowance(outro_plan=ai_effect_outro_plan_for_subtitles)
                 )
-                if ai_effect_outro_duration_for_subtitles > 0:
+                if ai_effect_outro_duration_for_subtitles > 0 and not _render_alignment_uses_rendered_audio_timing(
+                    ai_effect_candidate_alignment
+                ):
                     ai_effect_subtitles = _bound_render_subtitles_to_packaged_content_window(
                         ai_effect_subtitles,
                         content_end_sec=max(
@@ -12761,6 +12788,29 @@ async def _finalize_render_from_phase_outputs(
         }
 
     if not bool(final_render_subtitle_asr_alignment.get("gate_pass")):
+        try:
+            async with get_session_factory()() as diagnostics_session:
+                render_step_result = await diagnostics_session.execute(
+                    select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "render")
+                )
+                diagnostics_step = render_step_result.scalar_one_or_none()
+                diagnostics_session.add(
+                    Artifact(
+                        job_id=job.id,
+                        step_id=diagnostics_step.id if diagnostics_step else None,
+                        artifact_type=ARTIFACT_TYPE_RENDER_SUBTITLE_ASR_ALIGNMENT,
+                        data_json={
+                            "status": "blocked",
+                            "repaired": False,
+                            "variant": "packaged",
+                            "phase": "finalize_from_burn_in_phase",
+                            "final": final_render_subtitle_asr_alignment,
+                        },
+                    )
+                )
+                await diagnostics_session.commit()
+        except Exception:
+            pass
         raise RuntimeError(
             "render_final_subtitle_asr_alignment_blocked: packaged final video subtitle timing failed Qwen3-ASR gate"
         )
@@ -13788,6 +13838,17 @@ def _bound_render_subtitles_to_duration(
             next_item["render_duration_bound_repair"] = "clamp_to_variant_duration"
         bounded.append(next_item)
     return _monotonicize_packaged_subtitle_items(bounded)
+
+
+def _render_alignment_uses_rendered_audio_timing(alignment: dict[str, Any] | None) -> bool:
+    if not isinstance(alignment, dict):
+        return False
+    return (
+        str(alignment.get("status") or "") == "repaired"
+        and bool(alignment.get("repaired"))
+        and str(alignment.get("repair_mode") or "") == "rendered_audio_forced_alignment"
+        and bool((alignment.get("after") or {}).get("gate_pass"))
+    )
 
 
 def _bound_render_subtitles_to_packaged_content_window(
@@ -16632,11 +16693,52 @@ async def _overlay_avatar_segments_picture_in_picture(
         height=overlay_height,
     )
 
+    mask_paths: list[Path] = []
+    avatar_mask_input_index: int | None = None
+    border_mask_input_index: int | None = None
+    next_mask_input_index = len(available_segments) + 1
+    if avatar_corner_radius > 0:
+        mask_paths.append(
+            _write_rounded_alpha_mask_pgm(
+                width=overlay_width,
+                height=overlay_height,
+                corner_radius=avatar_corner_radius,
+                output_dir=output_path.parent,
+            )
+        )
+        avatar_mask_input_index = next_mask_input_index
+        next_mask_input_index += 1
+    if resolved_border_width > 0 and resolved_corner_radius > 0:
+        mask_paths.append(
+            _write_rounded_alpha_mask_pgm(
+                width=frame_width,
+                height=frame_height,
+                corner_radius=resolved_corner_radius,
+                output_dir=output_path.parent,
+            )
+        )
+        border_mask_input_index = next_mask_input_index
+        next_mask_input_index += 1
+
     cmd = ["ffmpeg", "-y", "-i", str(base_video_path)]
     for segment in available_segments:
         cmd.extend(["-i", str(segment["video_local_path"])])
+    for mask_path in mask_paths:
+        cmd.extend(["-loop", "1", "-i", str(mask_path)])
 
     filter_parts: list[str] = []
+    avatar_mask_labels = _append_mask_split_filter(
+        filter_parts,
+        input_label=f"{avatar_mask_input_index}:v" if avatar_mask_input_index is not None else None,
+        output_prefix="pipfgmasksrc",
+        count=len(available_segments),
+    )
+    border_mask_labels = _append_mask_split_filter(
+        filter_parts,
+        input_label=f"{border_mask_input_index}:v" if border_mask_input_index is not None else None,
+        output_prefix="pipbgmasksrc",
+        count=len(available_segments),
+    )
     current_label = "0:v"
     for index, segment in enumerate(available_segments, start=1):
         start_time = max(0.0, float(segment.get("start_time") or 0.0))
@@ -16657,12 +16759,18 @@ async def _overlay_avatar_segments_picture_in_picture(
             except Exception:
                 segment_avatar_fps = sample_avatar_fps
             avatar_fps_cache[str(segment_video_path)] = segment_avatar_fps
-        avatar_filter = _build_rounded_rgba_filter(
+        avatar_filter = _build_alpha_masked_rgba_filter(
+            input_label=f"{index}:v",
+            mask_input_label=avatar_mask_labels[index - 1],
+            output_label=f"pipfg{index}",
+            extra_filters=(
+                f"trim=duration={segment_duration:.6f},"
+                f"setpts=PTS-STARTPTS+{start_time:.6f}/TB,"
+                f"{_build_avatar_picture_in_picture_filters(base_duration=segment_duration, base_fps=base_fps, avatar_duration=segment_duration, avatar_fps=segment_avatar_fps, overlay_width=overlay_width, overlay_height=overlay_height)}"
+            ),
+        ) if avatar_mask_labels else _build_rgba_filter(
             input_label=f"{index}:v",
             output_label=f"pipfg{index}",
-            width=overlay_width,
-            height=overlay_height,
-            corner_radius=avatar_corner_radius,
             extra_filters=(
                 f"trim=duration={segment_duration:.6f},"
                 f"setpts=PTS-STARTPTS+{start_time:.6f}/TB,"
@@ -16671,17 +16779,23 @@ async def _overlay_avatar_segments_picture_in_picture(
         )
         filter_parts.append(avatar_filter)
         if resolved_border_width > 0:
-            filter_parts.append(
-                _build_timed_rounded_color_filter(
-                    output_label=f"pipbg{index}",
-                    color=border_rgb,
-                    width=frame_width,
-                    height=frame_height,
-                    corner_radius=resolved_corner_radius,
-                    start_time=start_time,
-                    duration=segment_duration,
-                )
+            bg_filter = _build_alpha_masked_color_filter(
+                output_label=f"pipbg{index}",
+                color=border_rgb,
+                width=frame_width,
+                height=frame_height,
+                mask_input_label=border_mask_labels[index - 1],
+                start_time=start_time,
+                duration=segment_duration,
+            ) if border_mask_labels else _build_color_filter(
+                output_label=f"pipbg{index}",
+                color=border_rgb,
+                width=frame_width,
+                height=frame_height,
+                start_time=start_time,
+                duration=segment_duration,
             )
+            filter_parts.append(bg_filter)
             filter_parts.append(
                 f"[pipbg{index}][pipfg{index}]overlay={resolved_border_width}:{resolved_border_width}:"
                 f"eof_action=pass:repeatlast=0:format=auto:alpha=straight[pip{index}]"
@@ -16714,19 +16828,24 @@ async def _overlay_avatar_segments_picture_in_picture(
             str(output_path),
         ]
     )
-    result = await asyncio.get_running_loop().run_in_executor(
-        None,
-        lambda: subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=get_settings().ffmpeg_timeout_sec,
-        ),
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg avatar segments picture-in-picture overlay failed: {result.stderr[-2000:]}")
+    try:
+        result = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=get_settings().ffmpeg_timeout_sec,
+            ),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg avatar segments picture-in-picture overlay failed: {result.stderr[-2000:]}")
+    finally:
+        for mask_path in mask_paths:
+            with suppress(OSError):
+                mask_path.unlink()
     return output_path
 
 
@@ -16784,7 +16903,6 @@ async def _overlay_avatar_picture_in_picture(
     resolved_border_width = max(0, min(12, int(border_width)))
     if max(base_duration, avatar_duration) >= 300.0:
         resolved_border_width = 0
-        corner_radius = 0
     frame_width = overlay_width + resolved_border_width * 2
     frame_height = overlay_height + resolved_border_width * 2
     safe_border_color = str(border_color or "#F4E4B8").strip()
@@ -16808,12 +16926,77 @@ async def _overlay_avatar_picture_in_picture(
         width=overlay_width,
         height=overlay_height,
     )
+    mask_paths: list[Path] = []
+    avatar_mask_input_index: int | None = None
+    border_mask_input_index: int | None = None
+    next_mask_input_index = 2
+    if avatar_corner_radius > 0:
+        mask_paths.append(
+            _write_rounded_alpha_mask_pgm(
+                width=overlay_width,
+                height=overlay_height,
+                corner_radius=avatar_corner_radius,
+                output_dir=output_path.parent,
+            )
+        )
+        avatar_mask_input_index = next_mask_input_index
+        next_mask_input_index += 1
+    if resolved_border_width > 0 and resolved_corner_radius > 0:
+        mask_paths.append(
+            _write_rounded_alpha_mask_pgm(
+                width=frame_width,
+                height=frame_height,
+                corner_radius=resolved_corner_radius,
+                output_dir=output_path.parent,
+            )
+        )
+        border_mask_input_index = next_mask_input_index
+        next_mask_input_index += 1
+    avatar_pip_filter = (
+        _build_alpha_masked_rgba_filter(
+            input_label="1:v",
+            mask_input_label=f"{avatar_mask_input_index}:v",
+            output_label="pip",
+            extra_filters=avatar_extra_filters,
+        )
+        if avatar_mask_input_index is not None
+        else _build_rgba_filter(
+            input_label="1:v",
+            output_label="pip",
+            extra_filters=avatar_extra_filters,
+        )
+    )
+    avatar_pipfg_filter = (
+        _build_alpha_masked_rgba_filter(
+            input_label="1:v",
+            mask_input_label=f"{avatar_mask_input_index}:v",
+            output_label="pipfg",
+            extra_filters=avatar_extra_filters,
+        )
+        if avatar_mask_input_index is not None
+        else _build_rgba_filter(
+            input_label="1:v",
+            output_label="pipfg",
+            extra_filters=avatar_extra_filters,
+        )
+    )
+    border_filter = (
+        _build_alpha_masked_color_filter(
+            output_label="pipbg",
+            color=border_rgb,
+            width=frame_width,
+            height=frame_height,
+            mask_input_label=f"{border_mask_input_index}:v",
+        )
+        if border_mask_input_index is not None
+        else _build_color_filter(output_label="pipbg", color=border_rgb, width=frame_width, height=frame_height)
+    )
 
     base_filter_prefix = "[0:v]setpts=PTS-STARTPTS[basev];"
     if resolved_border_width > 0:
         filter_chain = base_filter_prefix + (
-            f"{_build_rounded_color_filter(output_label='pipbg', color=border_rgb, width=frame_width, height=frame_height, corner_radius=resolved_corner_radius)};"
-            f"{_build_rounded_rgba_filter(input_label='1:v', output_label='pipfg', width=overlay_width, height=overlay_height, corner_radius=avatar_corner_radius, extra_filters=avatar_extra_filters)};"
+            f"{border_filter};"
+            f"{avatar_pipfg_filter};"
             f"[pipbg][pipfg]overlay={resolved_border_width}:{resolved_border_width}:format=auto:alpha=straight[pip];"
             f"[basev][pip]overlay=x={overlay_x}:y={overlay_y}:enable='{enable_expr}':eof_action=pass:format=auto:alpha=straight[vout]"
         )
@@ -16824,7 +17007,7 @@ async def _overlay_avatar_picture_in_picture(
         )
     else:
         filter_chain = base_filter_prefix + (
-            f"{_build_rounded_rgba_filter(input_label='1:v', output_label='pip', width=overlay_width, height=overlay_height, corner_radius=avatar_corner_radius, extra_filters=avatar_extra_filters)};"
+            f"{avatar_pip_filter};"
             f"[basev][pip]overlay=x={overlay_x}:y={overlay_y}:enable='{enable_expr}':eof_action=pass:format=auto:alpha=straight[vout]"
         )
 
@@ -16844,48 +17027,59 @@ async def _overlay_avatar_picture_in_picture(
         "+genpts",
         "-i",
         str(avatar_video_path),
-        "-filter_complex",
-        filter_chain,
-        "-map",
-        "[vout]",
-        "-map",
-        "0:a:0",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "18",
-        "-pix_fmt",
-        "yuv420p",
-        "-threads",
-        "2",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-ar",
-        "48000",
-        "-ac",
-        "2",
-        "-movflags",
-        "+faststart",
-        "-avoid_negative_ts",
-        "make_zero",
-        str(output_path),
     ]
-    result = await asyncio.to_thread(
-        subprocess.run,
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="ignore",
-        check=False,
-        timeout=get_settings().ffmpeg_timeout_sec,
+    for mask_path in mask_paths:
+        cmd.extend(["-loop", "1", "-i", str(mask_path)])
+    cmd.extend(
+        [
+            "-filter_complex",
+            filter_chain,
+            "-map",
+            "[vout]",
+            "-map",
+            "0:a:0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-pix_fmt",
+            "yuv420p",
+            "-threads",
+            "2",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-movflags",
+            "+faststart",
+            "-avoid_negative_ts",
+            "make_zero",
+            str(output_path),
+        ]
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg avatar picture-in-picture overlay failed: {result.stderr[-2000:]}")
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            check=False,
+            timeout=get_settings().ffmpeg_timeout_sec,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg avatar picture-in-picture overlay failed: {result.stderr[-2000:]}")
+    finally:
+        for mask_path in mask_paths:
+            with suppress(OSError):
+                mask_path.unlink()
     return output_path
 
 
@@ -16934,90 +17128,145 @@ def _ffmpeg_fps_expr(fps: float) -> str:
     return f"{fps:.6f}"
 
 
-def _build_rounded_color_filter(
+def _append_mask_split_filter(
+    filter_parts: list[str],
+    *,
+    input_label: str | None,
+    output_prefix: str,
+    count: int,
+) -> list[str]:
+    if not input_label:
+        return []
+    if count <= 1:
+        return [input_label]
+    output_labels = [f"{output_prefix}{index}" for index in range(1, count + 1)]
+    filter_parts.append(
+        f"[{input_label}]format=gray,split={count}"
+        + "".join(f"[{label}]" for label in output_labels)
+    )
+    return output_labels
+
+
+def _build_color_filter(
     *,
     output_label: str,
     color: str,
     width: int,
     height: int,
-    corner_radius: int,
+    start_time: float | None = None,
+    duration: float | None = None,
 ) -> str:
-    if corner_radius <= 0:
-        return f"color=c={color}:s={width}x{height},format=rgba[{output_label}]"
-    alpha_expr = _build_rounded_alpha_expr(width=width, height=height, corner_radius=corner_radius)
-    return (
-        f"color=c={color}:s={width}x{height},format=yuva444p,"
-        f"geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':alpha_expr='{alpha_expr}'[{output_label}]"
-    )
+    duration_part = f":d={max(0.1, float(duration or 0.0)):.6f}" if duration is not None else ""
+    filter_chain = f"color=c={color}:s={width}x{height}{duration_part}"
+    if start_time is not None:
+        filter_chain += f",setpts=PTS-STARTPTS+{max(0.0, float(start_time or 0.0)):.6f}/TB"
+    return f"{filter_chain},format=rgba[{output_label}]"
 
 
-def _build_timed_rounded_color_filter(
+def _build_alpha_masked_color_filter(
     *,
     output_label: str,
     color: str,
     width: int,
     height: int,
-    corner_radius: int,
-    start_time: float,
-    duration: float,
+    mask_input_label: str,
+    start_time: float | None = None,
+    duration: float | None = None,
 ) -> str:
-    duration_expr = max(0.1, float(duration or 0.0))
-    filter_prefix = (
-        f"color=c={color}:s={width}x{height}:d={duration_expr:.6f},"
-        f"setpts=PTS-STARTPTS+{max(0.0, float(start_time or 0.0)):.6f}/TB"
-    )
-    if corner_radius <= 0:
-        return f"{filter_prefix},format=rgba[{output_label}]"
-    alpha_expr = _build_rounded_alpha_expr(width=width, height=height, corner_radius=corner_radius)
+    duration_part = f":d={max(0.1, float(duration or 0.0)):.6f}" if duration is not None else ""
+    color_chain = f"color=c={color}:s={width}x{height}{duration_part}"
+    if start_time is not None:
+        color_chain += f",setpts=PTS-STARTPTS+{max(0.0, float(start_time or 0.0)):.6f}/TB"
     return (
-        f"{filter_prefix},format=yuva444p,"
-        f"geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':alpha_expr='{alpha_expr}'[{output_label}]"
+        f"{color_chain},format=rgb24[{output_label}rgb];"
+        f"[{mask_input_label}]format=gray[{output_label}mask];"
+        f"[{output_label}rgb][{output_label}mask]alphamerge[{output_label}]"
     )
 
 
-def _build_rounded_rgba_filter(
+def _build_rgba_filter(
     *,
     input_label: str,
     output_label: str,
-    width: int,
-    height: int,
-    corner_radius: int,
     extra_filters: str = "",
 ) -> str:
     filter_prefix = f"[{input_label}]"
     if extra_filters:
         filter_prefix += f"{extra_filters},"
-    filter_prefix += "format=yuva444p"
-    if corner_radius <= 0:
-        return f"{filter_prefix}[{output_label}]"
-    alpha_expr = _build_rounded_alpha_expr(width=width, height=height, corner_radius=corner_radius)
+    return f"{filter_prefix}format=rgba[{output_label}]"
+
+
+def _build_alpha_masked_rgba_filter(
+    *,
+    input_label: str,
+    mask_input_label: str,
+    output_label: str,
+    extra_filters: str = "",
+) -> str:
+    video_prefix = f"[{input_label}]"
+    if extra_filters:
+        video_prefix += f"{extra_filters},"
     return (
-        f"{filter_prefix},"
-        f"geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':alpha_expr='{alpha_expr}'[{output_label}]"
+        f"{video_prefix}format=rgb24[{output_label}rgb];"
+        f"[{mask_input_label}]format=gray[{output_label}mask];"
+        f"[{output_label}rgb][{output_label}mask]alphamerge[{output_label}]"
     )
 
 
-def _build_rounded_alpha_expr(*, width: int, height: int, corner_radius: int) -> str:
+def _write_rounded_alpha_mask_pgm(
+    *,
+    width: int,
+    height: int,
+    corner_radius: int,
+    output_dir: Path,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
     radius = _resolve_overlay_corner_radius(corner_radius=corner_radius, width=width, height=height)
-    if radius <= 0:
-        return "255"
-    max(0, width - 1)
-    max(0, height - 1)
-    right_center = width - radius - 1
-    bottom_center = height - radius - 1
-    radius_sq = radius * radius
-    inner_right = max(radius, width - radius - 1)
-    inner_bottom = max(radius, height - radius - 1)
-    core_checks = [
-        f"between(X,{radius},{inner_right})",
-        f"between(Y,{radius},{inner_bottom})",
-        f"lt(X,{radius})*lt(Y,{radius})*lte((X-{radius})*(X-{radius})+(Y-{radius})*(Y-{radius}),{radius_sq})",
-        f"gte(X,{inner_right})*lt(Y,{radius})*lte((X-{right_center})*(X-{right_center})+(Y-{radius})*(Y-{radius}),{radius_sq})",
-        f"lt(X,{radius})*gte(Y,{inner_bottom})*lte((X-{radius})*(X-{radius})+(Y-{bottom_center})*(Y-{bottom_center}),{radius_sq})",
-        f"gte(X,{inner_right})*gte(Y,{inner_bottom})*lte((X-{right_center})*(X-{right_center})+(Y-{bottom_center})*(Y-{bottom_center}),{radius_sq})",
-    ]
-    inside_expr = "+".join(core_checks)
-    return f"if(gt({inside_expr},0),255,0)"
+    fd, raw_path = tempfile.mkstemp(prefix="avatar_pip_mask_", suffix=".pgm", dir=str(output_dir))
+    mask_path = Path(raw_path)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(f"P5\n{width} {height}\n255\n".encode("ascii"))
+            if radius <= 0:
+                handle.write(bytes([255]) * width * height)
+                return mask_path
+            right_center = width - radius - 1
+            bottom_center = height - radius - 1
+            radius_sq = radius * radius
+            inner_right = max(radius, width - radius - 1)
+            inner_bottom = max(radius, height - radius - 1)
+            for y in range(height):
+                row = bytearray(width)
+                for x in range(width):
+                    inside = (
+                        radius <= x <= inner_right
+                        or radius <= y <= inner_bottom
+                        or (x < radius and y < radius and (x - radius) ** 2 + (y - radius) ** 2 <= radius_sq)
+                        or (
+                            x >= inner_right
+                            and y < radius
+                            and (x - right_center) ** 2 + (y - radius) ** 2 <= radius_sq
+                        )
+                        or (
+                            x < radius
+                            and y >= inner_bottom
+                            and (x - radius) ** 2 + (y - bottom_center) ** 2 <= radius_sq
+                        )
+                        or (
+                            x >= inner_right
+                            and y >= inner_bottom
+                            and (x - right_center) ** 2 + (y - bottom_center) ** 2 <= radius_sq
+                        )
+                    )
+                    row[x] = 255 if inside else 0
+                handle.write(row)
+    except Exception:
+        with suppress(OSError):
+            os.close(fd)
+        with suppress(OSError):
+            mask_path.unlink()
+        raise
+    return mask_path
 
 
 async def _probe_media_duration(path: Path) -> float:
@@ -18420,13 +18669,24 @@ def _apply_avatar_presenter_binding_to_plan(
         **binding,
         "status": "bound",
     }
-    plan["overlay_position"] = str(packaging_config.get("avatar_overlay_position") or "bottom_right")
-    plan["overlay_scale"] = float(
-        packaging_config.get("avatar_overlay_scale") or plan.get("overlay_scale") or 0.22
+    plan["overlay_position"] = str(
+        packaging_config.get("avatar_overlay_position") or DEFAULT_PACKAGING_CONFIG["avatar_overlay_position"]
     )
-    plan["overlay_corner_radius"] = int(packaging_config.get("avatar_overlay_corner_radius") or 0)
-    plan["overlay_border_width"] = int(packaging_config.get("avatar_overlay_border_width") or 0)
-    plan["overlay_border_color"] = str(packaging_config.get("avatar_overlay_border_color") or "#F4E4B8")
+    plan["overlay_scale"] = float(
+        packaging_config.get("avatar_overlay_scale")
+        or plan.get("overlay_scale")
+        or DEFAULT_PACKAGING_CONFIG["avatar_overlay_scale"]
+    )
+    plan["overlay_corner_radius"] = int(
+        packaging_config.get("avatar_overlay_corner_radius")
+        or DEFAULT_PACKAGING_CONFIG["avatar_overlay_corner_radius"]
+    )
+    plan["overlay_border_width"] = int(
+        packaging_config.get("avatar_overlay_border_width") or DEFAULT_PACKAGING_CONFIG["avatar_overlay_border_width"]
+    )
+    plan["overlay_border_color"] = str(
+        packaging_config.get("avatar_overlay_border_color") or DEFAULT_PACKAGING_CONFIG["avatar_overlay_border_color"]
+    )
     plan["overlay_margin"] = 28
     render_request = dict(plan.get("render_request") or {})
     render_request["presenter_id"] = presenter_id
@@ -18448,7 +18708,7 @@ def _avatar_missing_presenter_reason(plan: dict[str, Any] | None) -> str:
 
 def _avatar_full_track_failure_blocks_render(plan: dict[str, Any] | None) -> bool:
     payload = plan if isinstance(plan, dict) else {}
-    return not bool(payload.get("allow_plain_fallback"))
+    return payload.get("allow_plain_fallback") is False
 
 
 def _avatar_missing_presenter_execution(plan: dict[str, Any], *, reason: str) -> dict[str, Any]:
@@ -18552,6 +18812,139 @@ def _record_source_integrity(
     return actual_hash
 
 
+async def _run_smart_director_step(job_id: str, step_name: str) -> dict[str, Any]:
+    factory = get_session_factory()
+    parsed_job_id = uuid.UUID(str(job_id))
+    async with factory() as session:
+        result = await session.execute(
+            select(Job)
+            .options(selectinload(Job.steps))
+            .where(Job.id == parsed_job_id)
+        )
+        job = result.scalar_one()
+        step = next((item for item in list(job.steps or []) if item.step_name == step_name), None)
+
+        if step_name == "director_brief":
+            source_context = _smart_director_source_context(job)
+            payload = build_smart_director_brief(
+                job_id=str(job.id),
+                source_name=str(getattr(job, "source_name", "") or ""),
+                source_context=source_context,
+                task_brief=str(getattr(job, "task_brief", "") or ""),
+                video_description=str(source_context.get("video_description") or ""),
+                language=str(getattr(job, "language", "") or "zh-CN"),
+                platform_targets=list(getattr(job, "platform_targets_json", None) or []),
+            )
+        elif step_name == "script_plan":
+            payload = build_smart_director_script_plan(
+                await _load_required_smart_director_artifact(session, parsed_job_id, "director_brief")
+            )
+        elif step_name == "storyboard_plan":
+            payload = build_smart_director_storyboard_plan(
+                await _load_required_smart_director_artifact(session, parsed_job_id, "script_plan")
+            )
+        elif step_name == "asset_plan":
+            payload = build_smart_director_asset_plan(
+                await _load_required_smart_director_artifact(session, parsed_job_id, "storyboard_plan")
+            )
+        elif step_name == "asset_generation":
+            payload = await generate_smart_director_assets(
+                job_id=str(parsed_job_id),
+                asset_plan=await _load_required_smart_director_artifact(session, parsed_job_id, "asset_plan"),
+            )
+        elif step_name == "voiceover_plan":
+            payload = build_smart_director_voiceover_plan(
+                await _load_required_smart_director_artifact(session, parsed_job_id, "script_plan")
+            )
+        elif step_name == "music_plan":
+            payload = build_smart_director_music_plan(
+                await _load_required_smart_director_artifact(session, parsed_job_id, "script_plan")
+            )
+        elif step_name == "compose_plan":
+            payload = build_smart_director_compose_plan(
+                script_plan=await _load_required_smart_director_artifact(session, parsed_job_id, "script_plan"),
+                storyboard_plan=await _load_required_smart_director_artifact(session, parsed_job_id, "storyboard_plan"),
+                asset_plan=await _load_required_smart_director_artifact(session, parsed_job_id, "asset_plan"),
+                asset_generation=await _load_required_smart_director_artifact(session, parsed_job_id, "asset_generation"),
+                voiceover_plan=await _load_required_smart_director_artifact(session, parsed_job_id, "voiceover_plan"),
+                music_plan=await _load_required_smart_director_artifact(session, parsed_job_id, "music_plan"),
+            )
+        elif step_name == "director_review":
+            payload = build_smart_director_review(
+                await _load_required_smart_director_artifact(session, parsed_job_id, "compose_plan"),
+                await _load_required_smart_director_artifact(session, parsed_job_id, "asset_plan"),
+                await _load_required_smart_director_artifact(session, parsed_job_id, "asset_generation"),
+            )
+        else:
+            raise ValueError(f"Unknown smart director step: {step_name}")
+
+        artifact_type = SMART_DIRECTOR_ARTIFACT_TYPES[step_name]
+        await session.execute(
+            delete(Artifact).where(
+                Artifact.job_id == parsed_job_id,
+                Artifact.artifact_type == artifact_type,
+            )
+        )
+        payload = {
+            **payload,
+            "artifact_type": artifact_type,
+            "fingerprint": smart_director_artifact_fingerprint(payload),
+        }
+        session.add(
+            Artifact(
+                job_id=parsed_job_id,
+                step_id=getattr(step, "id", None),
+                artifact_type=artifact_type,
+                data_json=payload,
+            )
+        )
+        if step is not None:
+            step.metadata_ = {
+                **(step.metadata_ or {}),
+                "artifact_type": artifact_type,
+                "detail": f"{STEP_LABELS.get(step_name, step_name)}已生成。",
+                "progress": 1.0,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        await session.commit()
+        return {
+            "job_id": str(parsed_job_id),
+            "step": step_name,
+            "artifact_type": artifact_type,
+            "fingerprint": payload["fingerprint"],
+        }
+
+
+def _smart_director_source_context(job: Job) -> dict[str, Any]:
+    for step in list(getattr(job, "steps", None) or []):
+        metadata = dict(getattr(step, "metadata_", None) or {})
+        source_context = metadata.get("source_context")
+        if isinstance(source_context, dict):
+            return dict(source_context)
+    return {
+        "source_kind": "prompt_only" if str(getattr(job, "source_path", "") or "").startswith("prompt://") else "mixed_sources",
+        "source_name": str(getattr(job, "source_name", "") or ""),
+        "video_description": str(getattr(job, "task_brief", "") or ""),
+    }
+
+
+async def _load_required_smart_director_artifact(session, job_id: uuid.UUID, step_name: str) -> dict[str, Any]:
+    artifact_type = SMART_DIRECTOR_ARTIFACT_TYPES[step_name]
+    result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type == artifact_type,
+        )
+        .order_by(Artifact.created_at.desc())
+        .limit(1)
+    )
+    artifact = result.scalar_one_or_none()
+    if artifact is None or not isinstance(artifact.data_json, dict):
+        raise ValueError(f"Missing smart director artifact: {artifact_type}")
+    return dict(artifact.data_json)
+
+
 def run_step_sync(step_name: str, job_id: str) -> dict:
     """Synchronous entry point for Celery tasks."""
     # Dispose loop-bound asyncpg connections before starting a fresh event loop.
@@ -18577,6 +18970,15 @@ def run_step_sync(step_name: str, job_id: str) -> dict:
         "render_packaging_candidates": run_render_packaging_candidates,
         "render_burn_in": run_render_burn_in,
         "render": run_render,
+        "director_brief": lambda current_job_id: _run_smart_director_step(current_job_id, "director_brief"),
+        "script_plan": lambda current_job_id: _run_smart_director_step(current_job_id, "script_plan"),
+        "storyboard_plan": lambda current_job_id: _run_smart_director_step(current_job_id, "storyboard_plan"),
+        "asset_plan": lambda current_job_id: _run_smart_director_step(current_job_id, "asset_plan"),
+        "asset_generation": lambda current_job_id: _run_smart_director_step(current_job_id, "asset_generation"),
+        "voiceover_plan": lambda current_job_id: _run_smart_director_step(current_job_id, "voiceover_plan"),
+        "music_plan": lambda current_job_id: _run_smart_director_step(current_job_id, "music_plan"),
+        "compose_plan": lambda current_job_id: _run_smart_director_step(current_job_id, "compose_plan"),
+        "director_review": lambda current_job_id: _run_smart_director_step(current_job_id, "director_review"),
     }
     fn = step_map.get(step_name)
     if not fn:

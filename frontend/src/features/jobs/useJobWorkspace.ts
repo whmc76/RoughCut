@@ -1110,6 +1110,7 @@ export function useJobWorkspace({
     finalReviewDecision,
     refineAgentPlan,
     applyAgentPlan,
+    searchMatchedJobs,
     filteredJobs,
     selectedJob,
     reviewStep,

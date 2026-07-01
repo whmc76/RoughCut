@@ -65,7 +65,7 @@ afterEach(() => {
 
 describe("JobPublicationPanel manual handoff UI", () => {
   it("renders the manual handoff action and opens the login URL", async () => {
-    const windowOpen = vi.spyOn(window, "open").mockImplementation(() => null);
+    const mutate = vi.fn();
 
     reactQueryMocks.useQuery.mockImplementation((options: { queryKey?: unknown[] }) => {
       const queryKey = Array.isArray(options?.queryKey) ? options.queryKey : [];
@@ -127,11 +127,10 @@ describe("JobPublicationPanel manual handoff UI", () => {
     fireEvent.click(button);
 
     await waitFor(() => {
-      expect(windowOpen).toHaveBeenCalledWith(
-        "https://channels.weixin.qq.com/login.html",
-        "_blank",
-        "noopener,noreferrer",
-      );
+      expect(mutate).toHaveBeenCalledWith(expect.objectContaining({
+        url: "https://channels.weixin.qq.com/login.html",
+        platform: "wechat-channels",
+      }));
     });
   });
 
@@ -522,7 +521,6 @@ describe("JobPublicationPanel manual handoff UI", () => {
   });
 
   it("routes manual handoff plans to the manual publication entry instead of auto submit", async () => {
-    const windowOpen = vi.spyOn(window, "open").mockImplementation(() => null);
     const mutate = vi.fn();
 
     reactQueryMocks.useQuery.mockImplementation((options: { queryKey?: unknown[] }) => {
@@ -585,13 +583,12 @@ describe("JobPublicationPanel manual handoff UI", () => {
     fireEvent.click(publishButton);
 
     await waitFor(() => {
-      expect(windowOpen).toHaveBeenCalledWith(
-        "https://channels.weixin.qq.com/login.html",
-        "_blank",
-        "noopener,noreferrer",
-      );
+      expect(mutate).toHaveBeenCalledWith(expect.objectContaining({
+        url: "https://channels.weixin.qq.com/login.html",
+        platform: "wechat-channels",
+      }));
     });
-    expect(mutate).not.toHaveBeenCalled();
+    expect(mutate).toHaveBeenCalledTimes(1);
   });
 
   it("shows publication executor preflight messages from the plan contract", async () => {

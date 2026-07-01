@@ -1,5 +1,5 @@
 import type { Job } from "../../types";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../api";
@@ -224,10 +224,6 @@ function reviewStatusLabel(job: Job): string {
   return jobStatusLabel(job);
 }
 
-function isLocalOutputJob(job: Job) {
-  return Boolean(job.output_dir?.trim());
-}
-
 function hasJobStarted(job: Job) {
   if (job.status === "running" || job.status === "processing" || job.status === "awaiting_manual_edit" || job.status === "needs_review") return true;
   return job.steps.some((step) => Boolean(step.started_at));
@@ -333,17 +329,13 @@ type JobQueueTableProps = {
   hasMore?: boolean;
   isFetchingPage?: boolean;
   onPageChange?: (page: number) => void;
-  isOpeningFolder?: boolean;
   isCancelling?: boolean;
   isRestarting?: boolean;
   isStartingRemixProduction?: boolean;
   isDeleting?: boolean;
+  headerActions?: ReactNode;
   onSelect: (jobId: string) => void;
   onOpenReview?: (jobId: string) => void;
-  onPublish?: (jobId: string) => void;
-  onPreview?: (jobId: string) => void;
-  onOpenFolder: (jobId: string) => void;
-  onDownload: (jobId: string) => void;
   onCancel: (jobId: string) => void;
   onRestart: (jobId: string) => void;
   onStartRemixProduction?: (jobId: string, force?: boolean) => void;
@@ -359,17 +351,13 @@ export function JobQueueTable({
   hasMore,
   isFetchingPage,
   errorMessage,
-  isOpeningFolder,
   isCancelling,
   isRestarting,
   isStartingRemixProduction,
   isDeleting,
+  headerActions,
   onSelect,
   onOpenReview,
-  onPublish,
-  onPreview,
-  onOpenFolder,
-  onDownload,
   onCancel,
   onRestart,
   onStartRemixProduction,
@@ -404,6 +392,7 @@ export function JobQueueTable({
       <PanelHeader
         title={t("jobs.queue.title")}
         description={`#${jobs.length}${currentPage !== undefined ? ` · 第 ${currentPage + 1} 页` : ""}`}
+        actions={headerActions}
       />
       <div className="table-wrap">
         <table className="data-table job-queue-table">
@@ -448,8 +437,6 @@ export function JobQueueTable({
               const showReviewAction = job.status === "needs_review";
               const highlightedReviewAction = isHighlightedReviewAction(job);
               const showPreview = job.status === "done";
-              const showOpenFolder = job.status === "done";
-              const showDownload = job.status === "done" && !isLocalOutputJob(job);
               const showCancel = !isRemixTask && hasJobStarted(job) && !isTerminalJob(job);
               const manualEditStatus = awaitingManualEditLabel(job, t);
               const manualEditorReady = canOpenManualEditorFromQueue(job);
@@ -525,6 +512,17 @@ export function JobQueueTable({
                   <td>{formatDate(job.updated_at)}</td>
                   <td>
                     <div className="job-queue-actions">
+                      {showPreview ? (
+                        <Link
+                          className="button ghost button-sm job-icon-button job-preview-cta"
+                          to={`/final-review?job=${encodeURIComponent(job.id)}`}
+                          aria-label="去审看"
+                          title="去审看"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <JobActionIcon name="play" />
+                        </Link>
+                      ) : null}
                       {showReviewAction ? (
                         <button
                           className={classNames(
@@ -541,21 +539,6 @@ export function JobQueueTable({
                           }}
                         >
                           <JobActionIcon name="alert" />
-                        </button>
-                      ) : null}
-                      {job.status === "done" && !isPublicationTask ? (
-                        <button
-                          className="button button-sm job-icon-button job-publish-cta"
-                          type="button"
-                          aria-label="一键发布"
-                          title="一键发布"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onPublish?.(job.id);
-                          }}
-                        >
-                          <span className="job-publish-cta-rgb-mark" aria-hidden="true" />
-                          <JobActionIcon name="rocket" />
                         </button>
                       ) : null}
                       {isRemixTask && ["pending", "failed", "cancelled", "done"].includes(job.status) ? (
@@ -589,52 +572,9 @@ export function JobQueueTable({
                           <JobActionIcon name="scissors" />
                         </Link>
                       ) : null}
-                      {showPreview ? (
-                        <button
-                          className="button ghost button-sm job-icon-button job-preview-cta"
-                          type="button"
-                          aria-label={t("jobs.actions.preview")}
-                          title={t("jobs.actions.preview")}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onPreview?.(job.id);
-                          }}
-                        >
-                          <JobActionIcon name="play" />
-                        </button>
-                      ) : null}
-                      {showOpenFolder ? (
-                        <button
-                          className="button ghost button-sm job-icon-button"
-                          type="button"
-                          disabled={isOpeningFolder}
-                          aria-label={t("jobs.actions.openFolder")}
-                          title={t("jobs.actions.openFolder")}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onOpenFolder(job.id);
-                          }}
-                        >
-                          <JobActionIcon name={isOpeningFolder ? "spinner" : "folder"} />
-                        </button>
-                      ) : null}
-                      {showDownload ? (
-                        <button
-                          className="button ghost button-sm job-icon-button"
-                          type="button"
-                          aria-label={t("jobs.actions.download")}
-                          title={t("jobs.actions.download")}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onDownload(job.id);
-                          }}
-                        >
-                          <JobActionIcon name="download" />
-                        </button>
-                      ) : null}
                       {showCancel ? (
                         <button
-                          className="button ghost button-sm job-icon-button"
+                          className="button ghost button-sm job-icon-button job-cancel-cta"
                           type="button"
                           disabled={isCancelling}
                           aria-label={isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
@@ -671,7 +611,7 @@ export function JobQueueTable({
                             RESTART
                           </button>
                           <button
-                            className="button danger button-sm job-icon-button"
+                            className="button danger button-sm job-icon-button job-delete-cta"
                             type="button"
                             disabled={isDeleting}
                             aria-label={isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}

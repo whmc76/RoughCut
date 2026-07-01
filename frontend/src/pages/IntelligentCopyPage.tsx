@@ -30,10 +30,14 @@ import { copyStylePresets } from "../stylePresets";
 import type { IntelligentCopyGenerateTask, IntelligentCopyPlatformMaterial, PublicationAttempt, PublicationSchemeItem } from "../types";
 import { apiPath } from "../api/core";
 
-export function IntelligentCopyPage() {
+type IntelligentCopyPageProps = {
+  initialPage?: "generate" | "publish";
+};
+
+export function IntelligentCopyPage({ initialPage = "generate" }: IntelligentCopyPageProps) {
   const { t } = useI18n();
   const workspace = useIntelligentCopyWorkspace();
-  const [activePage, setActivePage] = useState<"generate" | "publish">("generate");
+  const [activePage, setActivePage] = useState<"generate" | "publish">(initialPage);
   const [previewPlatformKey, setPreviewPlatformKey] = useState<string | null>(null);
   const [pathInputFocused, setPathInputFocused] = useState(false);
   const [highlightedPathIndex, setHighlightedPathIndex] = useState(0);
@@ -79,8 +83,8 @@ export function IntelligentCopyPage() {
     <section className="page-stack">
       <PageHeader
         eyebrow={t("smartCopy.page.eyebrow")}
-        title={t("smartCopy.page.title")}
-        description={t("smartCopy.page.description")}
+        title={activePage === "publish" ? "发布跟踪" : t("smartCopy.page.title")}
+        description={activePage === "publish" ? "跟踪平台物料、发布队列、人工交接、回执和最终链接。" : t("smartCopy.page.description")}
         actions={
           <div className="toolbar">
             <Link className="button ghost" to="/publication-management">
@@ -108,8 +112,8 @@ export function IntelligentCopyPage() {
           className={`smart-copy-page-tab${activePage === "publish" ? " active" : ""}`}
           onClick={() => setActivePage("publish")}
         >
-          <strong>一键发布</strong>
-          <span>选择完成物料并提交发布队列</span>
+          <strong>发布跟踪</strong>
+          <span>一键发布、队列状态和平台回执</span>
         </button>
       </nav>
 
@@ -902,14 +906,14 @@ function PublicationPlatformProgressPanel({ targets, attempts, selectedPlatformI
   if (!selectedTargets.length) {
     return (
       <section className="panel top-gap">
-        <PanelHeader title="发布进度" />
-        <EmptyState message="还没有选择发布平台。" />
+        <PanelHeader title="平台状态矩阵" description="选择发布平台后显示标题、封面、分类、登录、回执和最终链接状态。" />
+        <EmptyState message="还没有选择发布平台。平台矩阵会在物料和账号绑定就绪后显示。" />
       </section>
     );
   }
   return (
     <section className="panel top-gap">
-      <PanelHeader title="发布进度" description="按平台跟踪状态、错误、执行摘要和最终链接。" />
+      <PanelHeader title="平台状态矩阵" description="按平台跟踪物料状态、错误、执行摘要、回执和最终链接。" />
       <div className="smart-copy-publication-progress-grid">
         {selectedTargets.map((target) => {
           const attempt = latestPublicationAttemptForPlatform(attempts, target.platform);

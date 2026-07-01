@@ -18,7 +18,12 @@ from roughcut.review.subtitle_memory import (
     build_transcription_prompt,
     resolve_transcription_category_scope,
 )
-from roughcut.review.transcription_context_prior import normalize_transcription_context_prior
+from roughcut.review.transcription_context_prior import (
+    _derive_context_term_aliases,
+    _extract_deterministic_context_hotwords,
+    _extract_labeled_context_terms,
+    normalize_transcription_context_prior,
+)
 
 
 @pytest.mark.asyncio
@@ -360,6 +365,28 @@ def test_transcription_context_prior_prefers_canonical_category_scope() -> None:
 
     assert prior["subject_domain"] == "flashlight"
     assert prior["category_scope"] == "flashlight"
+
+
+def test_transcription_context_prior_extracts_title_terms_for_asr_hotwords() -> None:
+    hotwords = _extract_deterministic_context_hotwords(
+        {
+            "source_name": "IMG_0218呼和新品EDC折刀魂2开箱五彩碳马版.MOV",
+            "video_description": "品牌：呼和；类型：EDC折刀；产品名：魂2；版本：五彩碳马版。",
+        }
+    )
+
+    assert "五彩碳马" in hotwords
+    assert "五彩碳马版" in hotwords
+    assert "EDC折刀" in hotwords
+    assert "魂2" in hotwords
+    assert "五彩碳把" not in hotwords
+
+
+def test_transcription_context_prior_extracts_labeled_fields_without_product_specific_terms() -> None:
+    terms = _extract_labeled_context_terms("品牌：NITECORE；类型：EDC手电；型号：EDC17；版本：钛合金版。")
+
+    assert terms == ["NITECORE", "EDC手电", "EDC17", "钛合金版"]
+    assert _derive_context_term_aliases("钛合金版") == ["钛合金"]
 
 
 def test_transcription_prompt_filters_cross_scope_terms_for_flashlight() -> None:

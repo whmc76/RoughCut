@@ -751,6 +751,51 @@ def media_render(self, job_id: str):
     return _run_task_step(self, job_id, "render", retry_countdown=30)
 
 
+@celery_app.task(name="roughcut.pipeline.tasks.llm_director_brief", bind=True, max_retries=2)
+def llm_director_brief(self, job_id: str):
+    return _run_task_step(self, job_id, "director_brief", retry_countdown=10)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.llm_script_plan", bind=True, max_retries=2)
+def llm_script_plan(self, job_id: str):
+    return _run_task_step(self, job_id, "script_plan", retry_countdown=10)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.llm_storyboard_plan", bind=True, max_retries=2)
+def llm_storyboard_plan(self, job_id: str):
+    return _run_task_step(self, job_id, "storyboard_plan", retry_countdown=10)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.llm_asset_plan", bind=True, max_retries=2)
+def llm_asset_plan(self, job_id: str):
+    return _run_task_step(self, job_id, "asset_plan", retry_countdown=10)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.media_asset_generation", bind=True, max_retries=1)
+def media_asset_generation(self, job_id: str):
+    return _run_task_step(self, job_id, "asset_generation", retry_countdown=30)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.llm_voiceover_plan", bind=True, max_retries=2)
+def llm_voiceover_plan(self, job_id: str):
+    return _run_task_step(self, job_id, "voiceover_plan", retry_countdown=10)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.llm_music_plan", bind=True, max_retries=2)
+def llm_music_plan(self, job_id: str):
+    return _run_task_step(self, job_id, "music_plan", retry_countdown=10)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.llm_compose_plan", bind=True, max_retries=2)
+def llm_compose_plan(self, job_id: str):
+    return _run_task_step(self, job_id, "compose_plan", retry_countdown=10)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.llm_director_review", bind=True, max_retries=2)
+def llm_director_review(self, job_id: str):
+    return _run_task_step(self, job_id, "director_review", retry_countdown=10)
+
+
 @celery_app.task(name="roughcut.pipeline.tasks.remix_production_run", bind=True, max_retries=0)
 def remix_production_run(self, job_id: str, command: list[str], output_dir: str):
     from roughcut.api.jobs import _run_remix_production_job

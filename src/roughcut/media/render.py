@@ -1397,6 +1397,7 @@ def _build_emphasis_overlay_filters(
             f"alpha='{alpha_expr}':"
             f"box=1:boxcolor={overlay_tokens['boxcolor']}:boxborderw={overlay_tokens['boxborderw']}:"
             f"borderw={overlay_tokens['borderw']}:bordercolor={overlay_tokens['bordercolor']}:"
+            f"shadowcolor={overlay_tokens['shadowcolor']}:shadowx={overlay_tokens['shadowx']}:shadowy={overlay_tokens['shadowy']}:"
             f"x={overlay_tokens['x_expr']}:y=h*{overlay_tokens['y_ratio']}"
             f"[{output_label}]"
         )
@@ -1407,25 +1408,36 @@ def _build_emphasis_overlay_filters(
 def _resolve_overlay_drawtext_tokens(base_tokens: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     tokens = dict(base_tokens)
     tokens.setdefault("x_expr", "(w-text_w)/2")
+    tokens.setdefault("shadowcolor", "black@0.20")
+    tokens.setdefault("shadowx", 0)
+    tokens.setdefault("shadowy", 4)
+    tokens["boxborderw"] = max(int(tokens.get("boxborderw") or 0), 18)
+    tokens["borderw"] = max(int(tokens.get("borderw") or 0), 3)
     treatment = str(overlay.get("visual_treatment") or "").strip().lower()
     if treatment == "hook_pop":
-        tokens["fontsize"] = int(tokens["fontsize"] * 1.02)
-        tokens["boxcolor"] = "0x101318@0.46"
-        tokens["bordercolor"] = "0xff8a2a@0.48"
+        tokens["fontsize"] = int(tokens["fontsize"] * 1.04)
+        tokens["fontcolor"] = "white"
+        tokens["boxcolor"] = "0xff4f9a@0.70"
+        tokens["bordercolor"] = "0xffffff@0.72"
         tokens["y_ratio"] = min(float(tokens["y_ratio"]), 0.125)
         tokens["x_expr"] = "(w-text_w)/2"
     elif treatment == "keyword_sticker":
-        tokens["fontcolor"] = "0xfff4dc"
-        tokens["boxcolor"] = "0x19130f@0.42"
-        tokens["bordercolor"] = "0xffb13d@0.42"
+        tokens["fontcolor"] = "0x20130f"
+        tokens["boxcolor"] = "0xfff0a6@0.78"
+        tokens["bordercolor"] = "0x55f0d0@0.76"
         tokens["x_expr"] = "w-text_w-w*0.055"
         tokens["y_ratio"] = max(float(tokens["y_ratio"]), 0.16)
     elif treatment == "beat_pulse":
         tokens["fontsize"] = int(tokens["fontsize"] * 0.9)
-        tokens["boxcolor"] = "0x101318@0.34"
-        tokens["bordercolor"] = "0xffffff@0.22"
+        tokens["fontcolor"] = "white"
+        tokens["boxcolor"] = "0x1c73ff@0.66"
+        tokens["bordercolor"] = "0xafff4d@0.70"
         tokens["x_expr"] = "w*0.055"
         tokens["y_ratio"] = max(float(tokens["y_ratio"]), 0.2)
+    elif treatment == "keyword_pop":
+        tokens["fontcolor"] = "white"
+        tokens["boxcolor"] = "0x111318@0.66"
+        tokens["bordercolor"] = "0x55f0d0@0.70"
     return tokens
 
 
@@ -2497,23 +2509,31 @@ def _build_hyperframes_visual_filters(
             continue
         start_time = max(0.0, float(element.get("start_sec") or 0.0))
         end_time = max(start_time + 0.4, float(element.get("end_sec") or start_time + 1.2))
+        fade_duration = min(0.12, max((end_time - start_time) / 3, 0.06))
+        alpha_expr = (
+            f"if(lt(t\\,{start_time})\\,0\\,"
+            f"if(lt(t\\,{start_time + fade_duration})\\,(t-{start_time})/{fade_duration}*0.98\\,"
+            f"if(lt(t\\,{end_time - fade_duration})\\,0.98\\,"
+            f"if(lt(t\\,{end_time})\\,({end_time}-t)/{fade_duration}*0.98\\,0))))"
+        )
         output_label = f"vhftext{index}"
-        x_expr = "(w-text_w)/2"
-        y_expr = "h*0.18"
-        font_size = max(34, min(72, int(render_h * 0.058)))
-        box_color = "0x101318@0.58"
-        border_color = "0xff8a3d@0.68"
-        enable_expr = f"between(t\\,{start_time}\\,{end_time})"
+        tokens = _resolve_hyperframes_text_element_tokens(
+            element,
+            render_w=render_w,
+            render_h=render_h,
+            index=index,
+        )
         parts.append(
             f"[{current_video}]drawtext="
             f"font='{font_name}':"
             f"text='{text}':"
-            f"fontsize={font_size}:"
-            f"fontcolor=white:"
-            f"box=1:boxcolor={box_color}:boxborderw={max(12, int(font_size * 0.3))}:"
-            f"borderw=2:bordercolor={border_color}:"
-            f"x={x_expr}:y={y_expr}:"
-            f"enable='{enable_expr}'"
+            f"fontsize={tokens['font_size']}:"
+            f"fontcolor={tokens['fontcolor']}:"
+            f"alpha='{alpha_expr}':"
+            f"box=1:boxcolor={tokens['boxcolor']}:boxborderw={tokens['boxborderw']}:"
+            f"borderw={tokens['borderw']}:bordercolor={tokens['bordercolor']}:"
+            f"shadowcolor={tokens['shadowcolor']}:shadowx={tokens['shadowx']}:shadowy={tokens['shadowy']}:"
+            f"x={tokens['x_expr']}:y={tokens['y_expr']}"
             f"[{output_label}]"
         )
         current_video = output_label
@@ -2593,6 +2613,41 @@ def _build_hyperframes_visual_filters(
             current_progress_label = title_label
         current_video = current_progress_label
     return parts, current_video
+
+
+def _resolve_hyperframes_text_element_tokens(
+    element: dict[str, Any],
+    *,
+    render_w: int,
+    render_h: int,
+    index: int,
+) -> dict[str, Any]:
+    position = element.get("position") if isinstance(element.get("position"), dict) else {}
+    center_x = int(position.get("x") or render_w * (0.62 if index % 2 == 0 else 0.38))
+    center_y = int(position.get("y") or render_h * (0.16 if index % 2 == 0 else 0.22))
+    style = str(element.get("style") or "").strip().lower()
+    font_size = max(32, min(68, int(render_h * 0.052)))
+    tokens: dict[str, Any] = {
+        "font_size": font_size,
+        "fontcolor": "white",
+        "boxcolor": "0x111318@0.68",
+        "boxborderw": max(18, int(font_size * 0.36)),
+        "borderw": 3,
+        "bordercolor": "0x55f0d0@0.74",
+        "shadowcolor": "black@0.22",
+        "shadowx": 0,
+        "shadowy": 5,
+        "x_expr": f"max(w*0.04\\,min(w-text_w-w*0.04\\,{center_x}-text_w/2))",
+        "y_expr": f"max(h*0.08\\,min(h*0.34\\,{center_y}-text_h/2))",
+    }
+    if style == "social_bubble_tag":
+        if index % 3 == 0:
+            tokens.update({"boxcolor": "0xff4f9a@0.70", "bordercolor": "0xffffff@0.76"})
+        elif index % 3 == 1:
+            tokens.update({"fontcolor": "0x241607", "boxcolor": "0xfff0a6@0.80", "bordercolor": "0x55f0d0@0.78"})
+        else:
+            tokens.update({"boxcolor": "0x1c73ff@0.68", "bordercolor": "0xafff4d@0.74"})
+    return tokens
 
 
 def _resolve_delivery_resolution(
@@ -2820,6 +2875,10 @@ def _stage_packaging_source(source_path: Path, temp_root: Path) -> Path:
     return source_path
 
 
+def _resolve_packaging_media_path(value: Any) -> Path:
+    return resolve_runtime_media_path(str(value or "").strip())
+
+
 async def _apply_insert_clip(
     source_path: Path,
     *,
@@ -2840,7 +2899,8 @@ async def _apply_insert_clip(
     )
 
     prepared_insert = output_path.with_name("insert_asset.prepared.mp4")
-    insert_source_duration = _probe_duration(Path(insert_plan["path"]))
+    insert_source_path = _resolve_packaging_media_path(insert_plan["path"])
+    insert_source_duration = _probe_duration(insert_source_path)
     prepare_insert_duration = resolve_insert_prepare_duration(insert_plan, source_duration=insert_source_duration)
     effective_insert_duration = resolve_insert_effective_duration(insert_plan, source_duration=insert_source_duration)
     transition_overlap = resolve_insert_transition_overlap(
@@ -2852,7 +2912,7 @@ async def _apply_insert_clip(
     entry_overlap_sec = float(transition_overlap.get("entry_sec", 0.0) or 0.0)
     exit_overlap_sec = float(transition_overlap.get("exit_sec", 0.0) or 0.0)
     await _prepare_packaging_clip(
-        Path(insert_plan["path"]),
+        insert_source_path,
         prepared_insert,
         expected_width=expected_width,
         expected_height=expected_height,
@@ -3036,7 +3096,7 @@ async def _apply_intro_outro(
     if intro_plan:
         intro_prepared = output_path.with_name("intro_asset.prepared.mp4")
         await _prepare_packaging_clip(
-            Path(intro_plan["path"]),
+            _resolve_packaging_media_path(intro_plan["path"]),
             intro_prepared,
             expected_width=expected_width,
             expected_height=expected_height,
@@ -3050,7 +3110,7 @@ async def _apply_intro_outro(
     if outro_plan:
         outro_prepared = output_path.with_name("outro_asset.prepared.mp4")
         await _prepare_packaging_clip(
-            Path(outro_plan["path"]),
+            _resolve_packaging_media_path(outro_plan["path"]),
             outro_prepared,
             expected_width=expected_width,
             expected_height=expected_height,
@@ -3130,6 +3190,20 @@ async def _apply_music_and_watermark(
     watermark_plan = _normalize_watermark_plan(watermark_plan)
     if not music_plan and not watermark_plan:
         return source_path
+    if music_plan and music_plan.get("path"):
+        music_plan = {
+            **dict(music_plan),
+            "path": str(_resolve_packaging_media_path(music_plan["path"])),
+            "candidate_paths": [
+                str(_resolve_packaging_media_path(path))
+                for path in list(music_plan.get("candidate_paths") or [])
+            ],
+        }
+    if watermark_plan and watermark_plan.get("path"):
+        watermark_plan = {
+            **dict(watermark_plan),
+            "path": str(_resolve_packaging_media_path(watermark_plan["path"])),
+        }
     try:
         source_duration = _probe_duration(source_path)
     except Exception:
@@ -3174,10 +3248,13 @@ async def _apply_music_and_watermark(
         music_output_path = output_path if not watermark_plan else output_path.with_name(f"{output_path.stem}.music{output_path.suffix}")
         cmd = [*_ffmpeg_base_cmd(), "-i", str(current_path)]
         filter_parts: list[str] = []
-        music_input_path = Path(music_plan["path"])
+        music_input_path = _resolve_packaging_media_path(music_plan["path"])
         if music_plan.get("loop_mode") == "loop_all":
             music_input_path = await _prepare_multi_track_music_loop(
-                candidate_paths=[Path(path) for path in music_plan.get("candidate_paths") or [music_plan["path"]]],
+                candidate_paths=[
+                    _resolve_packaging_media_path(path)
+                    for path in music_plan.get("candidate_paths") or [music_plan["path"]]
+                ],
                 output_path=output_path.with_name("music.loop_all.m4a"),
                 debug_dir=debug_dir,
                 cache_dir=(debug_dir / "packaging_subcache") if debug_dir is not None else None,

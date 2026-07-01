@@ -35,18 +35,13 @@ export function SettingsPage() {
       detail: "素材和输出规则。",
     },
     {
-      label: "记忆与词表",
-      value: "偏差记录 · 词条",
-      detail: "分开管理。",
+      label: "术语与记忆",
+      value: "知识校准",
+      detail: "统一维护术语表、记忆统计、热词和最近纠错。",
       action: (
-        <div className="toolbar">
-          <Link className="button ghost" to="/memory">
-            记忆页
-          </Link>
-          <Link className="button ghost" to="/glossary">
-            词表页
-          </Link>
-        </div>
+        <Link className="button ghost" to="/terms-memory">
+          打开术语与记忆
+        </Link>
       ),
     },
     {
@@ -84,8 +79,9 @@ export function SettingsPage() {
   return (
     <section className="page-stack settings-page settings-architecture-page">
       <PageHeader
-        title={t("settings.page.title")}
-        description={t("settings.page.description")}
+        eyebrow="系统"
+        title="系统设置"
+        description="管理模型、质量、运行和通知配置。"
         actions={
           <>
             <button
@@ -197,34 +193,29 @@ export function SettingsPage() {
       <PageSection
         className="settings-stage settings-stage-automation settings-stage-links"
         title="相关页面"
-        description="记忆、词表和控制页。"
+        description="知识校准和服务控制。"
       >
         <div className="settings-link-grid">
           <article className="settings-command-card">
-            <span className="settings-overview-label">记忆</span>
-            <strong>偏差和偏好</strong>
-            <div className="muted">查看长期偏差和偏好。</div>
+            <span className="settings-overview-label">术语与记忆</span>
+            <strong>知识校准</strong>
+            <div className="muted">查看术语表、记忆统计、热词和最近纠错。</div>
             <div className="top-gap">
-              <Link className="button ghost" to="/memory">
-                查看记忆
+              <Link className="button ghost" to="/terms-memory">
+                打开术语与记忆
               </Link>
             </div>
           </article>
           <article className="settings-command-card">
-            <span className="settings-overview-label">词表</span>
-            <strong>术语和导入</strong>
-            <div className="muted">编辑词条和导入规则。</div>
+            <span className="settings-overview-label">服务控制</span>
+            <strong>运行诊断</strong>
+            <div className="muted">查看服务健康、补偿队列和停机控制。</div>
             <div className="top-gap">
-              <Link className="button ghost" to="/glossary">
-                查看词表
+              <Link className="button ghost" to="/control">
+                打开服务控制
               </Link>
             </div>
           </article>
-        </div>
-        <div className="top-gap">
-          <Link className="button ghost" to="/control">
-            查看控制页
-          </Link>
         </div>
       </PageSection>
     </section>

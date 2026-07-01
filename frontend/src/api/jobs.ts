@@ -16,6 +16,7 @@ import type {
   JobsUsageSummary,
   JobsUsageTrend,
   IntelligentCopyGenerateTask,
+  PublicationAttempt,
   PublicationPlan,
   PublicationPlatformPublishOptions,
   Report,
@@ -254,6 +255,17 @@ export const jobsApi = {
     },
   ) =>
     request<PublicationPlan>(`/jobs/${jobId}/publication/publish`, { method: "POST", body: JSON.stringify(body) }),
+  backfillJobManualPublicationResult: (
+    jobId: string,
+    body: {
+      creator_profile_id?: string | null;
+      platform: string;
+      public_url?: string | null;
+      receipt_id?: string | null;
+      post_id?: string | null;
+    },
+  ) =>
+    request<PublicationAttempt>(`/jobs/${jobId}/publication/manual-result`, { method: "POST", body: JSON.stringify(body) }),
   rerunJob: (jobId: string, body: { issue_code?: string; rerun_start_step?: string; note?: string }) =>
     request<JobRerunResponse>(`/jobs/${jobId}/rerun`, { method: "POST", body: JSON.stringify(body) }),
   initializeJob: (
@@ -277,7 +289,7 @@ export const jobsApi = {
   warmContentProfileThumbnails: (jobId: string) => request<{ status: string; job_id: string }>(`/jobs/${jobId}/content-profile/thumbnails/warm`, {
     method: "POST",
   }),
-  jobRenderedFileUrl: (jobId: string, variant: "packaged" | "plain" = "packaged") =>
+  jobRenderedFileUrl: (jobId: string, variant: "auto" | "enhanced" | "packaged" | "plain" = "auto") =>
     apiPath(`/jobs/${jobId}/download/file?variant=${encodeURIComponent(variant)}&disposition=inline`),
   getJobDownloadFiles: (jobId: string) => request<JobDownloadFiles>(`/jobs/${jobId}/download/files`),
   downloadJobFiles: requestDownloadZip,

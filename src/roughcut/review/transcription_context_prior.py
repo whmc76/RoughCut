@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from typing import Any
 
 from roughcut.providers.factory import get_reasoning_provider
@@ -42,6 +43,7 @@ async def infer_transcription_context_prior(
             )
             payload = response.as_json()
             normalized = normalize_transcription_context_prior(payload)
+            _merge_deterministic_context_hotwords(normalized, context)
             normalized["status"] = "ok"
             normalized["model"] = str(getattr(response, "model", "") or "")
             normalized["attempt_count"] = attempt + 1
@@ -58,6 +60,103 @@ async def infer_transcription_context_prior(
             "attempt_count": 2,
         }
     return {}
+
+
+def _merge_deterministic_context_hotwords(prior: dict[str, Any], context: dict[str, Any]) -> None:
+    existing = _normalize_string_list(prior.get("allowed_hotwords"), limit=12)
+    blocked = {item.casefold() for item in _normalize_string_list(prior.get("blocked_hotwords"), limit=24)}
+    for term in _extract_deterministic_context_hotwords(context):
+        key = term.casefold()
+        if key in blocked or any(item.casefold() == key for item in existing):
+            continue
+        existing.append(term)
+        if len(existing) >= 12:
+            break
+    prior["allowed_hotwords"] = existing[:12]
+
+
+def _extract_deterministic_context_hotwords(context: dict[str, Any]) -> list[str]:
+    text_parts: list[str] = []
+    for key in ("source_name", "video_description", "manual_video_summary"):
+        value = _clean_text(context.get(key), limit=500)
+        if value:
+            text_parts.append(value)
+    resolved_feedback = context.get("resolved_feedback") if isinstance(context.get("resolved_feedback"), dict) else {}
+    for value in resolved_feedback.values():
+        if isinstance(value, (list, tuple, set)):
+            text_parts.extend(_clean_text(item, limit=120) for item in value if _clean_text(item, limit=120))
+        else:
+            cleaned = _clean_text(value, limit=240)
+            if cleaned:
+                text_parts.append(cleaned)
+    blob = " ".join(text_parts)
+    if not blob:
+        return []
+    compact = re.sub(r"\s+", "", blob)
+    compact = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", compact)
+    terms: list[str] = []
+
+    def add(value: Any) -> None:
+        text = _clean_text(value, limit=64).strip(" _-|，,。.!！?？()（）[]【】")
+        if not text:
+            return
+        if re.fullmatch(r"IMG[_-]?\d+", text, re.I):
+            return
+        if text.upper() in {"IMG", "MOV", "MP4", "M4V"}:
+            return
+        if text.casefold() not in {item.casefold() for item in terms}:
+            terms.append(text)
+
+    for value in _extract_labeled_context_terms(blob):
+        add(value)
+        for alias in _derive_context_term_aliases(value):
+            add(alias)
+    for pattern in (
+        r"[A-Za-z]{2,12}",
+        r"EDC[一-龥A-Za-z0-9]{0,8}",
+        r"[一-龥A-Za-z0-9]{1,12}折刀",
+        r"[一-龥A-Za-z0-9]{1,12}开箱",
+        r"[一-龥A-Za-z0-9]{1,12}版",
+        r"[一-龥A-Za-z0-9]{1,12}限量",
+        r"[一-龥]{1,8}[0-9一二三四五六七八九十]{1,4}",
+    ):
+        for match in re.finditer(pattern, compact, flags=re.I):
+            add(match.group(0))
+    return terms[:12]
+
+
+def _extract_labeled_context_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    label_pattern = r"(?:品牌|牌子|类型|品类|类别|产品名|商品名|型号|版本|版型|款式|材质|系列|名称)"
+    pattern = re.compile(
+        rf"{label_pattern}\s*[:：=]\s*([^；;，,。.!！?？\n\r|/]+)",
+        flags=re.I,
+    )
+    for match in pattern.finditer(str(text or "")):
+        value = _clean_text(match.group(1), limit=64)
+        value = value.strip(" _-|，,。.!！?？()（）[]【】")
+        if value and value.casefold() not in {item.casefold() for item in terms}:
+            terms.append(value)
+    return terms[:16]
+
+
+def _derive_context_term_aliases(value: Any) -> list[str]:
+    text = _clean_text(value, limit=64).strip(" _-|，,。.!！?？()（）[]【】")
+    if not text:
+        return []
+    aliases: list[str] = []
+
+    def add(alias: str) -> None:
+        normalized = _clean_text(alias, limit=64).strip(" _-|，,。.!！?？()（）[]【】")
+        if normalized and normalized != text and normalized.casefold() not in {item.casefold() for item in aliases}:
+            aliases.append(normalized)
+
+    if len(text) >= 3 and text.endswith(("版", "款", "型")):
+        add(text[:-1])
+    compact = re.sub(r"\s+", "", text)
+    if compact != text:
+        add(compact)
+    return aliases[:4]
 
 
 async def _complete_with_provider_timeout(

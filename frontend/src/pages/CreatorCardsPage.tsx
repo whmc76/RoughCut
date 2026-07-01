@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../api";
+import { PageHeader } from "../components/ui/PageHeader";
 import type { AvatarMaterialFile, AvatarMaterialLibrary, CreatorAsset, CreatorCard, PackagingAsset, PackagingLibrary } from "../types";
 
 const MAX_CREATOR_CARDS = 10;
@@ -107,6 +108,26 @@ const CREATOR_PLATFORM_OPTIONS = [
   "youtube",
   "x",
 ];
+const CREATOR_PLATFORM_LABELS: Record<string, string> = {
+  bilibili: "B 站",
+  xiaohongshu: "小红书",
+  douyin: "抖音",
+  kuaishou: "快手",
+  "wechat-channels": "视频号",
+  toutiao: "头条",
+  youtube: "YouTube",
+  x: "X",
+};
+const CREATOR_PLATFORM_HINTS: Record<string, string> = {
+  bilibili: "横版长内容",
+  xiaohongshu: "种草图文/短视频",
+  douyin: "竖版短视频",
+  kuaishou: "社区短视频",
+  "wechat-channels": "私域可信表达",
+  toutiao: "资讯分发",
+  youtube: "国际长短视频",
+  x: "短文案传播",
+};
 type CreatorDraft = {
   name: string;
   primaryPositioning: string;
@@ -154,14 +175,31 @@ function formatList(values: string[]) {
   return values.length ? values.join(" / ") : "未设置";
 }
 
+function creatorPlatformLabel(platform: string) {
+  return CREATOR_PLATFORM_LABELS[platform] ?? platform;
+}
+
+function formatPlatformList(values: string[]) {
+  return values.length ? values.map(creatorPlatformLabel).join(" / ") : "未设置";
+}
+
 function assetCategoryLabel(assetType: string) {
-  const normalizedType = assetType === "watermark" ? "logo" : assetType;
+  const normalizedType =
+    assetType === "watermark"
+      ? "logo"
+      : ["voice_sample", "voice", "reference_voice", "reference_audio"].includes(assetType)
+        ? "voice_reference"
+        : assetType === "music"
+          ? "music_library"
+          : assetType;
   return CREATOR_ASSET_CATEGORIES.find((category) => category.key === normalizedType)?.label ?? assetType;
 }
 
 function normalizeCreatorAssetCategory(assetType: string): CreatorAssetCategoryKey {
   if (assetType === "digital_human_sample") return "digital_human_closeup";
   if (assetType === "watermark") return "logo";
+  if (["voice_sample", "voice", "reference_voice", "reference_audio"].includes(assetType)) return "voice_reference";
+  if (assetType === "music") return "music_library";
   return CREATOR_ASSET_CATEGORIES.some((category) => category.key === assetType)
     ? (assetType as CreatorAssetCategoryKey)
     : "other";
@@ -411,6 +449,7 @@ export function CreatorCardsPage() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [editingCreatorId, setEditingCreatorId] = useState("");
   const [selectedCreatorId, setSelectedCreatorId] = useState("");
+  const [selectedAssetId, setSelectedAssetId] = useState("");
   const [draft, setDraft] = useState<CreatorDraft>(EMPTY_CREATOR_DRAFT);
   const [refinePrompt, setRefinePrompt] = useState("");
 
@@ -446,10 +485,12 @@ export function CreatorCardsPage() {
       ]
     : [];
   const groupedAssets = assetsByCategory(displayedAssets);
+  const selectedAsset = displayedAssets.find((asset) => asset.id === selectedAssetId) ?? displayedAssets[0] ?? null;
   const editingCreator = editingCreatorId ? creatorItems.find((creator) => creator.id === editingCreatorId) ?? null : null;
   const creatorModalMode = editingCreator ? "edit" : "create";
   const modalDomainOptions = Array.from(new Set([...CREATOR_DOMAIN_OPTIONS, ...draft.contentDomains]));
   const modalPlatformOptions = Array.from(new Set([...CREATOR_PLATFORM_OPTIONS, ...draft.defaultPlatforms]));
+  const visiblePlatformOptions = Array.from(new Set([...CREATOR_PLATFORM_OPTIONS, ...(selectedCreator?.default_platforms ?? [])]));
 
   useEffect(() => {
     if (!creatorItems.length) {
@@ -518,22 +559,44 @@ export function CreatorCardsPage() {
   });
 
   const refineCreator = useMutation({
-    mutationFn: () => api.refineCreatorCard(selectedCreatorId, refinePrompt),
+    mutationFn: () => {
+      const targetCreatorId = selectedCreator?.id || selectedCreatorId;
+      if (!targetCreatorId) throw new Error("请选择创作者");
+      return api.refineCreatorCard(targetCreatorId, refinePrompt);
+    },
     onSuccess: async () => {
       setRefinePrompt("");
       await refresh();
     },
   });
 
+  const updateCreatorPlatforms = useMutation({
+    mutationFn: ({ creator, platforms }: { creator: CreatorCard; platforms: string[] }) =>
+      api.patchCreatorCard(creator.id, { default_platforms: platforms }),
+    onSuccess: async (creator) => {
+      setSelectedCreatorId(creator.id);
+      await refresh();
+    },
+  });
+
   const uploadAsset = useMutation({
     mutationFn: ({ assetType, file }: { assetType: string; file: File }) => {
-      if (!selectedCreatorId) throw new Error("请选择创作者");
-      return api.uploadCreatorAsset(selectedCreatorId, file, assetType);
+      const targetCreatorId = selectedCreator?.id || selectedCreatorId;
+      if (!targetCreatorId) throw new Error("请选择创作者");
+      return api.uploadCreatorAsset(targetCreatorId, file, assetType);
     },
     onSuccess: async () => {
       await refresh();
     },
   });
+
+  const toggleCreatorPlatform = (platform: string) => {
+    if (!selectedCreator || updateCreatorPlatforms.isPending) return;
+    updateCreatorPlatforms.mutate({
+      creator: selectedCreator,
+      platforms: toggleValue(selectedCreator.default_platforms, platform),
+    });
+  };
 
   const uploadCategoryFile = (assetType: string, file: File | null | undefined) => {
     if (!file || uploadAsset.isPending) return;
@@ -564,208 +627,343 @@ export function CreatorCardsPage() {
 
   return (
     <section className="page-stack creator-cards-workspace">
-      <div className="creator-card-rail">
-        <div className="creator-card-rail-scroll">
-          {creatorItems.map((creator) => {
-            const active = selectedCreator?.id === creator.id;
-            const summary = compactCreatorText(creator.positioning || creator.natural_language_profile, "暂无定位描述");
-            const platformSummary = creatorPlatformSummary(creator.default_platforms);
-            const domainSummary = creatorDomainSummary(creator.content_domains);
-            const displayAssetCount =
-              creator.assets.length + packagingDisplayItems(packaging.data).length + avatarDisplayItems(avatarMaterials.data, creator).length;
-            return (
-              <button
-                key={creator.id}
-                type="button"
-                className={`creator-card-chip${active ? " selected" : ""}`}
-                onClick={() => setSelectedCreatorId(creator.id)}
-                title={summary}
-              >
-                <span className="creator-card-chip-top">
-                  <strong title={creator.name}>{creator.name}</strong>
-                  <span className="creator-card-state">
-                    <span aria-hidden="true" />
-                    {creator.status}
-                  </span>
-                </span>
-                <span className="creator-card-chip-meta">
-                  <span title={platformSummary}>{platformSummary}</span>
-                  <span title={domainSummary}>{domainSummary}</span>
-                  <span>{displayAssetCount} 素材</span>
-                </span>
-              </button>
-            );
-          })}
-          {!creatorItems.length ? <div className="creator-card-chip creator-card-chip-empty">还没有创作者</div> : null}
-        </div>
-        <div className="creator-card-rail-actions">
-          <span className="creator-card-count">
-            <strong>{creatorItems.length}</strong>
-            <span>/{MAX_CREATOR_CARDS}</span>
-          </span>
-          <button
-            type="button"
-            className="button primary creator-card-new"
-            disabled={reachedCreatorLimit}
-            onClick={openCreateCreatorModal}
-          >
-            新建创作者
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        eyebrow="资产库"
+        title="创作者卡片"
+        description="管理创作者身份、平台绑定、素材、偏好和默认策略关系。"
+      />
 
-      {selectedCreator ? (
-        <section className="panel creator-card-detail">
-          <form
-            className="creator-command-bar"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (refinePrompt.trim() && !refineCreator.isPending) refineCreator.mutate();
-            }}
-          >
-            <span>告诉我创作者档案想改什么</span>
-            <input
-              className="input"
-              value={refinePrompt}
-              onChange={(event) => setRefinePrompt(event.target.value)}
-              placeholder="例如：公开名称改为 FAS 机神圣殿 x 潮玩 EDC，定位改为 EDC 测评创作者"
-            />
-            <button
-              type="submit"
-              className="button primary"
-              disabled={!refinePrompt.trim() || refineCreator.isPending}
-            >
-              {refineCreator.isPending ? "发送中" : "发送"}
-            </button>
-          </form>
-
-          <div className="creator-detail-header">
+      <div className="creator-card-shell">
+        <aside className="creator-card-rail" aria-label="创作者列表">
+          <div className="creator-card-rail-head">
             <div>
-              <strong>{selectedCreator.name}</strong>
-              <div className="muted top-gap">
-                {selectedCreator.positioning || selectedCreator.natural_language_profile || "暂无定位描述"}
-              </div>
+              <strong>创作者</strong>
+              <span>{creatorItems.length}/{MAX_CREATOR_CARDS}</span>
             </div>
-            <div className="toolbar">
-              <button type="button" className="button ghost" onClick={() => openEditCreatorModal(selectedCreator)}>
-                编辑选项
-              </button>
-              <span className="status-pill">{selectedCreator.status}</span>
-              {(selectedCreator.default_platforms.length ? selectedCreator.default_platforms : ["未设置平台"]).map((platform) => (
-                <span key={platform} className="status-pill pending">{platform}</span>
-              ))}
-            </div>
+            <button
+              type="button"
+              className="button primary creator-card-new"
+              disabled={reachedCreatorLimit}
+              onClick={openCreateCreatorModal}
+            >
+              新建
+            </button>
           </div>
-
-          <div className="creator-field-grid">
-            <CreatorField label="卡片 ID" value={selectedCreator.id} />
-            <CreatorField label="公开名称" value={selectedCreator.name} />
-            <CreatorField label="状态" value={selectedCreator.status} />
-            <CreatorField label="默认平台" value={formatList(selectedCreator.default_platforms)} />
-            <CreatorField label="创建时间" value={formatDateTime(selectedCreator.created_at)} />
-            <CreatorField label="更新时间" value={formatDateTime(selectedCreator.updated_at)} />
+          <div className="creator-card-rail-scroll">
+            {creatorItems.map((creator) => {
+              const active = selectedCreator?.id === creator.id;
+              const summary = compactCreatorText(creator.positioning || creator.natural_language_profile, "暂无定位描述");
+              const platformSummary = creatorPlatformSummary(creator.default_platforms);
+              const domainSummary = creatorDomainSummary(creator.content_domains);
+              const displayAssetCount =
+                creator.assets.length + packagingDisplayItems(packaging.data).length + avatarDisplayItems(avatarMaterials.data, creator).length;
+              return (
+                <button
+                  key={creator.id}
+                  type="button"
+                  className={`creator-card-chip${active ? " selected" : ""}`}
+                  onClick={() => setSelectedCreatorId(creator.id)}
+                  title={summary}
+                >
+                  <span className="creator-card-chip-top">
+                    <strong title={creator.name}>{creator.name}</strong>
+                    <span className="creator-card-state">
+                      <span aria-hidden="true" />
+                      {creator.status}
+                    </span>
+                  </span>
+                  <span className="creator-card-chip-summary">{summary}</span>
+                  <span className="creator-card-chip-meta">
+                    <span title={platformSummary}>{platformSummary}</span>
+                    <span title={domainSummary}>{domainSummary}</span>
+                    <span>{displayAssetCount} 素材</span>
+                  </span>
+                </button>
+              );
+            })}
+            {!creatorItems.length ? <div className="creator-card-chip creator-card-chip-empty">还没有创作者</div> : null}
           </div>
+        </aside>
 
-          <section className="creator-detail-block">
-            <div className="creator-detail-block-head">
-              <div className="creator-detail-block-label">定位与受众</div>
-              <span className="muted">Agent 生成策略时优先读取这些信息</span>
-            </div>
-            <div className="creator-positioning-grid">
-              <CreatorField label="内容领域" value={formatList(selectedCreator.content_domains)} />
-              <CreatorField label="受众定位" value={selectedCreator.audience || "未设置"} />
-              <CreatorField label="创作者定位" value={selectedCreator.positioning || "未设置"} />
-              <CreatorField label="档案补充" value={selectedCreator.natural_language_profile || "未设置"} />
-            </div>
-          </section>
+        {selectedCreator ? (
+          <>
+            <main className="creator-card-detail">
+              <form
+                className="creator-command-bar"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (refinePrompt.trim() && !refineCreator.isPending) refineCreator.mutate();
+                }}
+              >
+                <span>快速修改档案</span>
+                <input
+                  className="input"
+                  value={refinePrompt}
+                  onChange={(event) => setRefinePrompt(event.target.value)}
+                  placeholder="例如：公开名称改为 FAS 机神圣殿 x 潮玩 EDC，定位改为 EDC 测评创作者"
+                />
+                <button
+                  type="submit"
+                  className="button primary"
+                  disabled={!refinePrompt.trim() || refineCreator.isPending}
+                >
+                  {refineCreator.isPending ? "发送中" : "发送"}
+                </button>
+              </form>
 
-          <section className="creator-detail-block">
-            <div className="creator-detail-block-head">
-              <div className="creator-detail-block-label">绑定方案概览</div>
-              <span className="muted">与当前创作者卡片关联</span>
-            </div>
-            <div className="creator-linked-grid">
-              <CreatorField
-                label="任务策略"
-                value={`${taskStrategies.data?.items.length ?? 0} 套${activeTaskStrategy ? `，启用：${activeTaskStrategy.name}` : ""}`}
-              />
-              <CreatorField
-                label="智能视觉方案"
-                value={`${visualPlans.data?.items.length ?? 0} 套${activeVisualPlan ? `，启用：${activeVisualPlan.name}` : ""}`}
-              />
-              <CreatorField label="发布配置" value={publicationProfile.data?.status || "未生成"} />
-              <CreatorField label="平台凭证绑定" value={`${publicationProfile.data?.bindings.length ?? 0} 个`} />
-            </div>
-          </section>
-
-          <section className="creator-detail-block creator-assets-block">
-            <div className="creator-detail-block-head">
-              <div className="creator-detail-block-label">创作者素材</div>
-              <span className="muted">{displayedAssets.length} 个素材，含旧包装库和数字人库</span>
-            </div>
-            <div className="creator-asset-category-grid">
-              {groupedAssets.map((category) => (
-                <section key={category.key} className="creator-asset-category">
-                  <div className="creator-asset-category-head">
-                    <div>
-                      <strong>{category.label}</strong>
-                      <span>{category.hint}</span>
+              <section className="creator-identity-panel">
+                <div className="creator-detail-header">
+                  <div>
+                    <strong>{selectedCreator.name}</strong>
+                    <div className="muted top-gap">
+                      {selectedCreator.positioning || selectedCreator.natural_language_profile || "暂无定位描述"}
                     </div>
-                    <span className="status-pill pending">{category.assets.length}</span>
                   </div>
-                  <label
-                    className={`creator-upload-zone${uploadAsset.isPending ? " uploading" : ""}`}
-                    onDragOver={(event) => {
-                      event.preventDefault();
-                      event.dataTransfer.dropEffect = "copy";
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      uploadCategoryFile(category.key, event.dataTransfer.files?.[0]);
-                    }}
-                  >
-                    <input
-                      type="file"
-                      disabled={uploadAsset.isPending}
-                      onChange={(event) => {
-                        uploadCategoryFile(category.key, event.target.files?.[0]);
-                        event.currentTarget.value = "";
-                      }}
-                    />
-                    <strong>{uploadAsset.isPending ? "上传中" : "点击或拖拽上传"}</strong>
-                    <span>{category.label} 专用素材，选择后自动上传</span>
-                  </label>
-                  <div className="creator-asset-list">
-                    {category.assets.length ? category.assets.map((asset) => (
-                      <article key={asset.id} className="creator-asset-row" title={asset.path}>
-                        <CreatorAssetPreview asset={asset} />
-                        <div className="creator-asset-row-footer">
-                          <div className="creator-asset-row-copy">
-                            <strong>{asset.title}</strong>
-                            <span>{asset.subtitle}</span>
+                  <div className="toolbar">
+                    <span className="status-pill">{selectedCreator.status}</span>
+                    <button type="button" className="button ghost" onClick={() => openEditCreatorModal(selectedCreator)}>
+                      编辑选项
+                    </button>
+                  </div>
+                </div>
+                <div className="creator-positioning-grid">
+                  <CreatorField label="内容领域" value={formatList(selectedCreator.content_domains)} />
+                  <CreatorField label="受众定位" value={selectedCreator.audience || "未设置"} />
+                  <CreatorField label="创作者定位" value={selectedCreator.positioning || "未设置"} />
+                  <CreatorField label="档案补充" value={selectedCreator.natural_language_profile || "未设置"} />
+                </div>
+              </section>
+
+              <section className="creator-platform-panel">
+                <div className="creator-detail-block-head">
+                  <div>
+                    <div className="creator-detail-block-label">平台默认值</div>
+                    <span className="muted">勾选默认发布平台，生成与排产流程会优先使用。</span>
+                  </div>
+                  <span className="status-pill pending">已选 {selectedCreator.default_platforms.length}/{visiblePlatformOptions.length}</span>
+                </div>
+                <div className="creator-platform-grid">
+                  {visiblePlatformOptions.map((platform) => {
+                    const selected = selectedCreator.default_platforms.includes(platform);
+                    return (
+                      <button
+                        key={platform}
+                        type="button"
+                        className={`creator-platform-tile${selected ? " selected" : ""}`}
+                        disabled={updateCreatorPlatforms.isPending}
+                        onClick={() => toggleCreatorPlatform(platform)}
+                      >
+                        <span>
+                          <strong>{creatorPlatformLabel(platform)}</strong>
+                          <em>{CREATOR_PLATFORM_HINTS[platform] ?? platform}</em>
+                        </span>
+                        <b>{selected ? "已选" : "可选"}</b>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <section className="creator-detail-block creator-assets-block">
+                <div className="creator-detail-block-head">
+                  <div>
+                    <div className="creator-detail-block-label">素材库</div>
+                    <span className="muted">{displayedAssets.length} 个素材，含旧包装库和数字人库。</span>
+                  </div>
+                  <span className="status-pill">{groupedAssets.filter((category) => category.assets.length).length} 类有素材</span>
+                </div>
+                <div className="creator-assets-layout">
+                  <div className="creator-asset-category-grid">
+                    {groupedAssets.map((category) => {
+                      const primaryAsset = category.assets[0] ?? null;
+                      const isMusicLibrary = category.key === "music_library";
+                      return (
+                        <section key={category.key} className={`creator-asset-category${isMusicLibrary ? " music-library" : ""}`}>
+                          <div className="creator-asset-category-head">
+                            <div>
+                              <strong>{category.label}</strong>
+                              <span>{category.hint}</span>
+                            </div>
+                            <span className="status-pill pending">
+                              {isMusicLibrary ? category.assets.length : primaryAsset ? "已配置" : "0"}
+                            </span>
                           </div>
-                          <button
-                            type="button"
-                            className="creator-asset-delete"
-                            disabled={deleteAsset.isPending}
-                            onClick={() => deleteAsset.mutate(asset)}
-                          >
-                            删除
-                          </button>
-                        </div>
-                      </article>
-                    )) : <div className="muted compact-text">未上传</div>}
+                          {isMusicLibrary ? (
+                            <div className="creator-asset-list creator-asset-music-list">
+                              {category.assets.length ? category.assets.map((asset) => (
+                                <article
+                                  key={asset.id}
+                                  className={`creator-asset-row${selectedAsset?.id === asset.id ? " selected" : ""}`}
+                                  title={asset.path}
+                                >
+                                  <button
+                                    type="button"
+                                    className="creator-asset-select"
+                                    onClick={() => setSelectedAssetId(asset.id)}
+                                  >
+                                    <span className={`creator-asset-kind ${asset.mediaKind}`}>{asset.mediaKind}</span>
+                                    <span className="creator-asset-row-copy">
+                                      <strong>{asset.title}</strong>
+                                      <span>{asset.subtitle}</span>
+                                    </span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="creator-asset-delete"
+                                    disabled={deleteAsset.isPending}
+                                    onClick={() => deleteAsset.mutate(asset)}
+                                  >
+                                    删除
+                                  </button>
+                                </article>
+                              )) : <div className="muted compact-text">未上传</div>}
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className={`creator-asset-slot${primaryAsset && selectedAsset?.id === primaryAsset.id ? " selected" : ""}`}
+                              disabled={!primaryAsset}
+                              title={primaryAsset?.path || category.hint}
+                              onClick={() => {
+                                if (primaryAsset) setSelectedAssetId(primaryAsset.id);
+                              }}
+                            >
+                              <span className={`creator-asset-kind ${primaryAsset?.mediaKind || "file"}`}>
+                                {primaryAsset?.mediaKind || "empty"}
+                              </span>
+                              <span className="creator-asset-row-copy">
+                                <strong>{primaryAsset?.title || "未上传"}</strong>
+                                <span>{primaryAsset ? primaryAsset.subtitle : category.hint}</span>
+                              </span>
+                            </button>
+                          )}
+                          <div className="creator-asset-category-actions">
+                            <label
+                              className={`creator-upload-zone${uploadAsset.isPending ? " uploading" : ""}`}
+                              onDragOver={(event) => {
+                                event.preventDefault();
+                                event.dataTransfer.dropEffect = "copy";
+                              }}
+                              onDrop={(event) => {
+                                event.preventDefault();
+                                uploadCategoryFile(category.key, event.dataTransfer.files?.[0]);
+                              }}
+                            >
+                              <input
+                                type="file"
+                                disabled={uploadAsset.isPending}
+                                onChange={(event) => {
+                                  uploadCategoryFile(category.key, event.target.files?.[0]);
+                                  event.currentTarget.value = "";
+                                }}
+                              />
+                              <strong>{uploadAsset.isPending ? "上传中" : primaryAsset && !isMusicLibrary ? "替换" : "上传"}</strong>
+                              <span>{isMusicLibrary ? "可上传多首 BGM" : `${category.label} 素材`}</span>
+                            </label>
+                            {primaryAsset && !isMusicLibrary ? (
+                              <button
+                                type="button"
+                                className="creator-asset-delete"
+                                disabled={deleteAsset.isPending}
+                                onClick={() => deleteAsset.mutate(primaryAsset)}
+                              >
+                                删除
+                              </button>
+                            ) : null}
+                          </div>
+                        </section>
+                      );
+                    })}
                   </div>
-                </section>
-              ))}
+                  <aside className="creator-live-preview" aria-label="素材实时预览">
+                    <div className="creator-live-preview-head">
+                      <div>
+                        <strong>实时预览</strong>
+                        <span>{selectedAsset ? assetCategoryLabel(selectedAsset.category) : "选择素材后预览"}</span>
+                      </div>
+                      {selectedAsset ? <span className="status-pill pending">{selectedAsset.mediaKind}</span> : null}
+                    </div>
+                    {selectedAsset ? (
+                      <>
+                        <div className="creator-live-preview-stage">
+                          <CreatorAssetPreview asset={selectedAsset} />
+                        </div>
+                        <div className="creator-live-preview-meta">
+                          <strong title={selectedAsset.title}>{selectedAsset.title}</strong>
+                          <span title={selectedAsset.subtitle}>{selectedAsset.subtitle}</span>
+                          <code title={selectedAsset.path}>{selectedAsset.path}</code>
+                        </div>
+                        <button
+                          type="button"
+                          className="creator-asset-delete"
+                          disabled={deleteAsset.isPending}
+                          onClick={() => deleteAsset.mutate(selectedAsset)}
+                        >
+                          删除当前素材
+                        </button>
+                      </>
+                    ) : (
+                      <div className="creator-live-preview-empty">还没有可预览素材</div>
+                    )}
+                  </aside>
+                </div>
+              </section>
+            </main>
+
+            <aside className="creator-inspector-panel">
+              <section className="creator-detail-block">
+                <div className="creator-detail-block-head">
+                  <div className="creator-detail-block-label">默认关系</div>
+                  <span className="muted">当前卡片关联</span>
+                </div>
+                <div className="creator-linked-grid">
+                  <CreatorField
+                    label="任务策略"
+                    value={`${taskStrategies.data?.items.length ?? 0} 套${activeTaskStrategy ? `，启用：${activeTaskStrategy.name}` : ""}`}
+                  />
+                  <CreatorField
+                    label="视觉方案"
+                    value={`${visualPlans.data?.items.length ?? 0} 套${activeVisualPlan ? `，启用：${activeVisualPlan.name}` : ""}`}
+                  />
+                  <CreatorField label="发布配置" value={publicationProfile.data?.status || "未生成"} />
+                  <CreatorField label="平台凭证绑定" value={`${publicationProfile.data?.bindings.length ?? 0} 个`} />
+                </div>
+              </section>
+              <section className="creator-detail-block">
+                <div className="creator-detail-block-head">
+                  <div className="creator-detail-block-label">元信息</div>
+                  <span className="muted">辅助信息</span>
+                </div>
+                <div className="creator-linked-grid">
+                  <CreatorField label="卡片 ID" value={selectedCreator.id} />
+                  <CreatorField label="公开名称" value={selectedCreator.name} />
+                  <CreatorField label="状态" value={selectedCreator.status} />
+                  <CreatorField label="默认平台" value={formatPlatformList(selectedCreator.default_platforms)} />
+                  <CreatorField label="创建时间" value={formatDateTime(selectedCreator.created_at)} />
+                  <CreatorField label="更新时间" value={formatDateTime(selectedCreator.updated_at)} />
+                </div>
+              </section>
+            </aside>
+          </>
+        ) : (
+          <main className="panel creator-card-empty-state">
+            <div className="creator-detail-header">
+              <div>
+                <strong>还没有创作者卡片</strong>
+                <div className="muted top-gap">新建后可维护创作者身份、平台绑定、素材和默认策略关系。</div>
+              </div>
+              <button
+                type="button"
+                className="button primary"
+                disabled={reachedCreatorLimit}
+                onClick={openCreateCreatorModal}
+              >
+                新建创作者
+              </button>
             </div>
-          </section>
-        </section>
-      ) : (
-        <section className="panel">
-          <div className="muted">还没有创作者卡片。</div>
-        </section>
-      )}
+          </main>
+        )}
+      </div>
 
       {createModalOpen ? (
         <div className="floating-modal-backdrop" onClick={closeCreatorModal} role="presentation">

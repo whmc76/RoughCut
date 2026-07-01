@@ -51,6 +51,7 @@ def creator_asset_path_candidates(stored_path: Any) -> list[Path]:
         if suffix:
             candidates.append(Path(get_settings().output_dir).expanduser().resolve() / "_creator_assets" / Path(suffix))
             candidates.append(DEFAULT_OUTPUT_ROOT / "_creator_assets" / Path(suffix))
+            candidates.append(DEFAULT_OUTPUT_ROOT / "output" / "_creator_assets" / Path(suffix))
             candidates.append((DEFAULT_PROJECT_ROOT / "data" / "output") / "_creator_assets" / Path(suffix))
             candidates.append((DEFAULT_PROJECT_ROOT / "data" / "runtime" / "output") / "_creator_assets" / Path(suffix))
 
@@ -59,7 +60,9 @@ def creator_asset_path_candidates(stored_path: Any) -> list[Path]:
         if normalized.startswith("/app/data/output/"):
             relative = normalized.removeprefix("/app/data/output/").strip("/")
             if relative:
+                candidates.append(Path(get_settings().output_dir).expanduser().resolve() / Path(relative))
                 candidates.append(DEFAULT_OUTPUT_ROOT / Path(relative))
+                candidates.append(DEFAULT_OUTPUT_ROOT / "output" / Path(relative))
                 candidates.append((DEFAULT_PROJECT_ROOT / "data" / "output") / Path(relative))
                 candidates.append((DEFAULT_PROJECT_ROOT / "data" / "runtime" / "output") / Path(relative))
 
@@ -122,7 +125,7 @@ def creator_packaging_asset_types(assets: list[dict[str, Any] | Any]) -> set[str
 
 
 def creator_has_complete_packaging_assets(assets: list[dict[str, Any] | Any]) -> bool:
-    return {"intro", "watermark", "music"}.issubset(creator_packaging_asset_types(assets))
+    return {"intro", "outro", "watermark", "music"}.issubset(creator_packaging_asset_types(assets))
 
 
 def pick_creator_avatar_presenter_asset(assets: list[dict[str, Any] | Any]) -> dict[str, Any] | None:

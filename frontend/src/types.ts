@@ -918,6 +918,11 @@ export type ManualHandoffTarget = {
   label?: string | null;
   status?: string | null;
   login_url?: string | null;
+  manual_publish_entry_url?: string | null;
+  account_label?: string | null;
+  credential_ref?: string | null;
+  browser_profile_id?: string | null;
+  browser_binding?: Record<string, unknown>;
   reason?: string | null;
 };
 
@@ -946,8 +951,12 @@ export type IntelligentCopyGenerateTask = {
   id: string;
   folder_path: string;
   copy_style?: string | null;
+  platforms?: string[];
+  platform_options?: Record<string, PublicationPlatformPublishOptions>;
   use_existing_cover?: boolean;
   force_regenerate?: boolean;
+  creator_profile_id?: string | null;
+  creator_profile_name?: string | null;
   status: "queued" | "running" | "completed" | "manual_handoff" | "blocked" | "failed" | string;
   progress: number;
   stage: string;
@@ -1089,6 +1098,8 @@ export type PublicationCredentialBinding = {
   platform_label?: string;
   account_label?: string | null;
   credential_ref?: string | null;
+  browser_profile_id?: string | null;
+  browser_binding?: Record<string, unknown>;
   status: string;
   enabled: boolean;
   adapter?: string;
@@ -1122,6 +1133,7 @@ export type PublicationTarget = {
   description?: string | null;
   declaration?: string | null;
   tags: string[];
+  tags_copy?: string | null;
   full_copy?: string | null;
   cover_path?: string | null;
   cover_slots?: Array<Record<string, unknown>>;
@@ -1136,6 +1148,28 @@ export type PublicationTarget = {
   manual_publish_entry_url?: string | null;
   manual_reason?: string | null;
   status: string;
+};
+
+export type PublicationEntryOpenRequest = {
+  url: string;
+  platform?: string | null;
+  account_label?: string | null;
+  credential_ref?: string | null;
+  browser_profile_id?: string | null;
+  browser_binding?: Record<string, unknown> | null;
+};
+
+export type PublicationEntryOpenResponse = {
+  opened: boolean;
+  url: string;
+  platform?: string | null;
+  account_label?: string | null;
+  credential_ref?: string | null;
+  browser_profile_id?: string | null;
+  browser?: string | null;
+  used_binding: boolean;
+  mode: string;
+  message: string;
 };
 
 export type PublicationCollectionOption = {
@@ -1274,6 +1308,14 @@ export type PublicationPlan = {
   adapter: string;
   creator_profile_id: string;
   creator_profile_name: string;
+  platform_options?: Record<string, PublicationPlatformPublishOptions>;
+  creator_default_platforms?: string[];
+  creator_platform_option_platforms?: string[];
+  platform_selection_policy?: {
+    source?: string;
+    default_platforms?: string[];
+    option_platforms?: string[];
+  };
   media_path?: string | null;
   material_targets?: PublicationTarget[];
   targets: PublicationTarget[];

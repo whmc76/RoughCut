@@ -187,6 +187,50 @@ def test_collect_downloadable_files_uses_runtime_mapped_path(tmp_path, monkeypat
     assert files[0]["_path"] == str(target.resolve())
 
 
+def test_collect_downloadable_files_orders_final_enhanced_video_before_standard_edit(tmp_path) -> None:
+    packaged = tmp_path / "sample_成片.mp4"
+    enhanced = tmp_path / "sample_增强版.mp4"
+    packaged.write_bytes(b"packaged")
+    enhanced.write_bytes(b"enhanced")
+
+    files = jobs_api._collect_downloadable_files(
+        None,
+        {
+            "packaged_mp4": str(packaged),
+            "enhanced_mp4": str(enhanced),
+        },
+    )
+
+    video_ids = [item["id"] for item in files if item["kind"] == "video"]
+    assert video_ids[:2] == ["enhanced_mp4", "packaged_mp4"]
+    assert files[0]["label"] == "成片（最终增强版）"
+    assert files[1]["label"] == "成片（标准剪辑版）"
+
+
+def test_auto_download_variant_prefers_enhanced_then_packaged(tmp_path) -> None:
+    packaged = tmp_path / "sample_成片.mp4"
+    enhanced = tmp_path / "sample_增强版.mp4"
+    packaged.write_bytes(b"packaged")
+    enhanced.write_bytes(b"enhanced")
+
+    selected = jobs_api._resolve_download_variant_path(
+        SimpleNamespace(output_path=str(packaged)),
+        {
+            "packaged_mp4": str(packaged),
+            "enhanced_mp4": str(enhanced),
+        },
+        "auto",
+    )
+    fallback = jobs_api._resolve_download_variant_path(
+        SimpleNamespace(output_path=str(packaged)),
+        {"packaged_mp4": str(packaged)},
+        "auto",
+    )
+
+    assert selected == enhanced.resolve()
+    assert fallback == packaged.resolve()
+
+
 def test_job_open_target_prefers_runtime_mount_path_for_host_runtime_output(tmp_path, monkeypatch) -> None:
     container_root = tmp_path / "container-runtime"
     target = container_root / "output" / "demo" / "final.mp4"

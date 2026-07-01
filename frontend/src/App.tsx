@@ -1,6 +1,20 @@
 import { lazy, Suspense, useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { NavLink, Route, Routes } from "react-router-dom";
+import {
+  Blocks,
+  BookOpenCheck,
+  Brain,
+  ClipboardCheck,
+  Gauge,
+  Library,
+  PlaySquare,
+  Settings,
+  SlidersHorizontal,
+  Sparkles,
+  UploadCloud,
+  Wrench,
+} from "lucide-react";
+import { Navigate, NavLink, Route, Routes } from "react-router-dom";
 
 import { api } from "./api";
 import { getProviderLabel } from "./features/settings/helpers";
@@ -10,18 +24,19 @@ import { useI18n } from "./i18n";
 const OverviewPage = lazy(async () => ({ default: (await import("./pages/OverviewPage")).OverviewPage }));
 const JobsPage = lazy(async () => ({ default: (await import("./pages/JobsPage")).JobsPage }));
 const JobManualEditorPage = lazy(async () => ({ default: (await import("./pages/JobManualEditorPage")).JobManualEditorPage }));
+const FinalReviewPage = lazy(async () => ({ default: (await import("./pages/FinalReviewPage")).FinalReviewPage }));
 const WatchRootsPage = lazy(async () => ({ default: (await import("./pages/WatchRootsPage")).WatchRootsPage }));
 const IntelligentCopyPage = lazy(async () => ({ default: (await import("./pages/IntelligentCopyPage")).IntelligentCopyPage }));
+const PublicationTrackingPage = lazy(async () => ({ default: (await import("./pages/PublicationTrackingPage")).PublicationTrackingPage }));
 const CreatorCardsPage = lazy(async () => ({ default: (await import("./pages/CreatorCardsPage")).CreatorCardsPage }));
 const TaskStrategiesPage = lazy(async () => ({ default: (await import("./pages/TaskStrategiesPage")).TaskStrategiesPage }));
 const VisualPlansPage = lazy(async () => ({ default: (await import("./pages/VisualPlansPage")).VisualPlansPage }));
 const PublicationManagementPage = lazy(async () => ({ default: (await import("./pages/PublicationManagementPage")).PublicationManagementPage }));
+const TermsMemoryPage = lazy(async () => ({ default: (await import("./pages/TermsMemoryPage")).TermsMemoryPage }));
 const ToolsPage = lazy(async () => ({ default: (await import("./pages/ToolsPage")).ToolsPage }));
 const TtsToolPage = lazy(async () => ({ default: (await import("./pages/ToolsPage")).TtsToolPage }));
 const AsrToolPage = lazy(async () => ({ default: (await import("./pages/ToolsPage")).AsrToolPage }));
 const AvatarToolPage = lazy(async () => ({ default: (await import("./pages/ToolsPage")).AvatarToolPage }));
-const MemoryPage = lazy(async () => ({ default: (await import("./pages/MemoryPage")).MemoryPage }));
-const GlossaryPage = lazy(async () => ({ default: (await import("./pages/GlossaryPage")).GlossaryPage }));
 const SettingsPage = lazy(async () => ({ default: (await import("./pages/SettingsPage")).SettingsPage }));
 const ControlPage = lazy(async () => ({ default: (await import("./pages/ControlPage")).ControlPage }));
 
@@ -53,31 +68,29 @@ export function App() {
 
   const navigationGroups = [
     {
-      title: "工作台",
+      title: "工作流",
       items: [
-        { to: "/", label: t("app.nav.overview") },
-        { to: "/jobs", label: t("app.nav.jobs") },
-        { to: "/watch-roots", label: t("app.nav.watchRoots") },
-        { to: "/intelligent-copy", label: t("app.nav.intelligentCopy") },
-        { to: "/tools", label: t("app.nav.tools") },
+        { to: "/", label: t("app.nav.overview"), icon: Gauge },
+        { to: "/jobs", label: t("app.nav.jobs"), icon: UploadCloud },
+        { to: "/final-review", label: "成片审看", icon: PlaySquare },
+        { to: "/publication-tracking", label: t("app.nav.intelligentCopy"), icon: ClipboardCheck },
       ],
     },
     {
-      title: "创作资产",
+      title: "资产库",
       items: [
-        { to: "/creator-cards", label: "创作者卡片库" },
-        { to: "/task-strategies", label: "任务策略库" },
-        { to: "/visual-plans", label: "智能视觉方案" },
-        { to: "/publication-management", label: "智能发布管理" },
+        { to: "/creator-cards", label: "创作者卡片", icon: Library },
+        { to: "/task-strategies", label: "任务策略", icon: SlidersHorizontal },
+        { to: "/visual-plans", label: "视觉方案", icon: Sparkles },
+        { to: "/terms-memory", label: "术语与记忆", icon: BookOpenCheck },
       ],
     },
     {
       title: "系统",
       items: [
-        { to: "/settings", label: t("app.nav.settings") },
-        { to: "/memory", label: "记忆" },
-        { to: "/glossary", label: "术语表" },
-        { to: "/control", label: "控制台" },
+        { to: "/tools", label: t("app.nav.tools"), icon: Wrench },
+        { to: "/settings", label: t("app.nav.settings"), icon: Settings },
+        { to: "/control", label: t("app.nav.control"), icon: Blocks },
       ],
     },
   ];
@@ -106,17 +119,20 @@ export function App() {
             <div className="rail-nav-section" key={group.title}>
               <div className="rail-nav-section-label">{group.title}</div>
               <div className="rail-nav-section-links">
-                {group.items.map((item, index) => (
+                {group.items.map((item, index) => {
+                  const Icon = item.icon ?? Brain;
+                  return (
                   <NavLink
                     key={item.to}
                     to={item.to}
                     end={item.to === "/"}
                     className={({ isActive }) => (isActive ? "rail-link active" : "rail-link")}
                   >
-                    <span className="rail-link-index">{`${index + 1}`.padStart(2, "0")}</span>
+                    <span className="rail-link-icon" aria-hidden="true"><Icon size={16} strokeWidth={1.8} /></span>
                     <span className="rail-link-label">{item.label}</span>
                   </NavLink>
-                ))}
+                  );
+                })}
               </div>
             </div>
           ))}
@@ -167,18 +183,22 @@ export function App() {
               <Route path="/" element={<OverviewPage />} />
               <Route path="/jobs" element={<JobsPage />} />
               <Route path="/jobs/:jobId/manual-editor" element={<JobManualEditorPage />} />
+              <Route path="/final-review" element={<FinalReviewPage />} />
+              <Route path="/auto-tasks" element={<WatchRootsPage />} />
               <Route path="/watch-roots" element={<WatchRootsPage />} />
               <Route path="/intelligent-copy" element={<IntelligentCopyPage />} />
+              <Route path="/publication-tracking" element={<PublicationTrackingPage />} />
               <Route path="/creator-cards" element={<CreatorCardsPage />} />
               <Route path="/task-strategies" element={<TaskStrategiesPage />} />
               <Route path="/visual-plans" element={<VisualPlansPage />} />
               <Route path="/publication-management" element={<PublicationManagementPage />} />
+              <Route path="/terms-memory" element={<TermsMemoryPage />} />
               <Route path="/tools" element={<ToolsPage />} />
               <Route path="/tools/tts" element={<TtsToolPage />} />
               <Route path="/tools/asr" element={<AsrToolPage />} />
               <Route path="/tools/avatar" element={<AvatarToolPage />} />
-              <Route path="/memory" element={<MemoryPage />} />
-              <Route path="/glossary" element={<GlossaryPage />} />
+              <Route path="/memory" element={<Navigate to="/terms-memory?tab=memory" replace />} />
+              <Route path="/glossary" element={<Navigate to="/terms-memory?tab=glossary" replace />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/control" element={<ControlPage />} />
             </Routes>

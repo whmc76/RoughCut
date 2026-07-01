@@ -656,6 +656,13 @@ class Settings(BaseSettings):
     intelligent_copy_cover_dreamina_submit_timeout_ms: int = 60000
     intelligent_copy_cover_dreamina_capture_timeout_ms: int = 120000
     intelligent_copy_cover_dreamina_min_submit_interval_ms: int = 45000
+    smart_director_asset_generation_enabled: bool = True
+    smart_director_asset_generation_max_items: int = 4
+    smart_director_image_generation_provider: str = "dreamina_web"
+    smart_director_image_generation_model: str = ""
+    smart_director_video_generation_provider: str = "jimeng_cli"
+    smart_director_video_generation_command: str = ""
+    smart_director_video_generation_timeout_sec: int = 900
     packaging_selection_review_gap: float = 0.08
     packaging_selection_min_score: float = 0.6
     edit_decision_llm_review_enabled: bool = True

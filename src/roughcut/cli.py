@@ -367,6 +367,7 @@ def orchestrator(poll_interval: float):
 @click.option("--folder-path", required=True)
 @click.option("--copy-style", default=None)
 @click.option("--platform", "platforms", multiple=True)
+@click.option("--platform-options-json", default=None)
 @click.option("--use-existing-cover/--no-use-existing-cover", default=False)
 @click.option("--force-regenerate/--reuse-existing-materials", default=False)
 @click.option("--creator-profile-id", default=None)
@@ -376,6 +377,7 @@ def intelligent_copy_task_runner(
     folder_path: str,
     copy_style: str | None,
     platforms: tuple[str, ...],
+    platform_options_json: str | None,
     use_existing_cover: bool,
     force_regenerate: bool,
     creator_profile_id: str | None,
@@ -384,11 +386,20 @@ def intelligent_copy_task_runner(
     """Run one intelligent copy generation task in a dedicated process."""
     from roughcut.api.intelligent_copy import _run_generation_task_thread
 
+    platform_options = {}
+    if platform_options_json:
+        try:
+            loaded = json.loads(platform_options_json)
+        except json.JSONDecodeError as exc:
+            raise click.ClickException(f"Invalid --platform-options-json: {exc}") from exc
+        platform_options = loaded if isinstance(loaded, dict) else {}
+
     _run_generation_task_thread(
         task_id,
         folder_path,
         copy_style,
         list(platforms) or None,
+        platform_options,
         use_existing_cover,
         force_regenerate,
         creator_profile_id,

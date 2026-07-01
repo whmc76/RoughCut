@@ -159,3 +159,55 @@ def test_result_collection_rejects_short_temp_result(
 
     assert result is None
     assert copied_sources == []
+
+
+def test_resolve_or_collect_result_path_copies_local_shared_result_before_cleanup(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    task_dir = tmp_path / "temp" / "avatar_full_track_part_00"
+    task_dir.mkdir(parents=True)
+    raw_result = task_dir / "result.avi"
+    raw_result.write_bytes(b"avatar")
+
+    monkeypatch.setattr(heygem, "_detect_shared_root", lambda: tmp_path)
+
+    result = heygem._resolve_or_collect_result_path(
+        "/code/data/temp/avatar_full_track_part_00/result.avi",
+        task_code="avatar_full_track_part_00",
+    )
+
+    collected = tmp_path / "result" / "roughcut_collected" / "avatar_full_track_part_00_result.avi"
+    assert result == str(collected.resolve())
+    assert collected.read_bytes() == b"avatar"
+    assert raw_result.exists()
+
+
+def test_cleanup_heygem_task_artifacts_removes_raw_task_files_but_preserves_collected(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    task_dir = tmp_path / "temp" / "avatar_full_track_part_00"
+    task_dir.mkdir(parents=True)
+    (task_dir / "result.avi").write_bytes(b"raw")
+    root_result = tmp_path / "avatar_full_track_part_00-r.mp4"
+    root_result.write_bytes(b"root")
+    result_dir_result = tmp_path / "result" / "avatar_full_track_part_00-r.mp4"
+    result_dir_result.parent.mkdir(parents=True)
+    result_dir_result.write_bytes(b"result")
+    collected = tmp_path / "result" / "roughcut_collected" / "avatar_full_track_part_00_result.avi"
+    collected.parent.mkdir(parents=True)
+    collected.write_bytes(b"collected")
+
+    monkeypatch.setattr(heygem, "_detect_shared_root", lambda: tmp_path)
+
+    heygem._cleanup_heygem_task_artifacts(
+        task_code="avatar_full_track_part_00",
+        result_value="/code/data/temp/avatar_full_track_part_00/result.avi",
+        preserved_paths=[str(collected)],
+    )
+
+    assert not task_dir.exists()
+    assert not root_result.exists()
+    assert not result_dir_result.exists()
+    assert collected.read_bytes() == b"collected"

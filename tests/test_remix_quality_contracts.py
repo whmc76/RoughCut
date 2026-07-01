@@ -650,6 +650,14 @@ def test_caption_package_records_default_jianying_style_packaging_counts() -> No
     assert metadata["max_subtitle_line_chars"] <= 17
     assert metadata["theme_banner_count"] == 3
     assert metadata["keyword_sticker_count"] == 3
+    assert {item.get("style") for item in metadata["hyperframes_plan"]["elements"] if item.get("track") == "keyword_stickers"} >= {
+        "social_bubble_plate",
+        "social_bubble_text",
+    }
+    assert {item.get("style") for item in metadata["hyperframes_plan"]["elements"] if item.get("track") == "impact_words"} >= {
+        "impact_bubble_plate",
+        "impact_bubble_text",
+    }
     assert metadata["watermark_event_count"] == 1
     assert metadata["emphasis_keyword_count"] >= 1
     assert metadata["motion_effect_count"] >= 12

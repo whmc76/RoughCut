@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { AlertTriangle, CheckCircle2, Clock3, PlayCircle } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
@@ -8,7 +9,6 @@ import { JobCreateModal } from "../features/jobs/JobCreateModal";
 import { JobDetailModal } from "../features/jobs/JobDetailModal";
 import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
 import { JobDownloadDialog } from "../features/jobs/JobDownloadDialog";
-import { JobPublicationPanel } from "../features/jobs/JobPublicationPanel";
 import { JobQueueTable } from "../features/jobs/JobQueueTable";
 import { JobReviewOverlay } from "../features/jobs/JobReviewOverlay";
 import { JobUploadPanel } from "../features/jobs/JobUploadPanel";
@@ -30,11 +30,18 @@ const TASK_KIND_FILTER_META: Array<{ key: JobTaskKindFilter; label: string }> = 
 const FILM_REMIX_WORKFLOW_MODES = new Set(["remix_auto_commentary", "remix_llm_plan", "script_footage_remix"]);
 const DEFAULT_FILM_REMIX_ENHANCEMENT_MODES = ["ai_effects"];
 const DEFAULT_FILM_REMIX_AGENT_CAPABILITIES = [
+  "reference_style_analysis",
+  "source_media_inspection",
   "highlight_window_selection",
   "multi_material_assembly",
+  "stock_footage_retrieval",
+  "generative_scene_plan",
   "chapter_cards",
   "local_audio_cues",
+  "soundtrack_audio_mix",
   "speech_density_trim",
+  "cost_budget_governance",
+  "delivery_quality_governance",
 ];
 
 const PUBLICATION_FILTER_META: Array<{ key: JobPublicationFilter; label: string }> = [
@@ -52,6 +59,22 @@ const CLIP_STATUS_FILTER_META: Array<{ key: JobClipStatusFilter; label: string }
 
 function remixTaskLabel(task: RemixProductionTask) {
   return `S${String(task.season).padStart(2, "0")}E${String(task.episode).padStart(2, "0")} · ${task.title}`;
+}
+
+function isPublishedJob(job: Job) {
+  return job.publication_status === "published" || job.status === "published";
+}
+
+function isReleaseCandidateJob(job: Job) {
+  return job.status === "done" && !isPublishedJob(job);
+}
+
+function isProductionActiveJob(job: Job) {
+  return ["pending", "queued", "running", "processing", "awaiting_init"].includes(job.status);
+}
+
+function isReleaseBlockerJob(job: Job) {
+  return ["needs_review", "awaiting_manual_edit", "failed", "cancelled", "blocked_missing_script"].includes(job.status);
 }
 
 function remixProductionTaskToJob(task: RemixProductionTask, manifestCreatedAt?: string): Job | null {
@@ -102,8 +125,6 @@ export function JobsPage() {
   const [reviewNoticeTone, setReviewNoticeTone] = useState<"success" | "error">("success");
   const [pendingSubtitleRerun, setPendingSubtitleRerun] = useState<{ rerunStartStep: string | null; issueCode: string | null } | null>(null);
   const [detailModalOpen, setDetailModalOpen] = useState(false);
-  const [publicationJobId, setPublicationJobId] = useState<string | null>(null);
-  const [previewJobId, setPreviewJobId] = useState<string | null>(null);
   const [downloadJobId, setDownloadJobId] = useState<string | null>(null);
   const [reviewOverlayOpen, setReviewOverlayOpen] = useState(false);
   const [reviewStepOverride, setReviewStepOverride] = useState<JobReviewStep | null>(null);
@@ -185,14 +206,8 @@ export function JobsPage() {
   const activeReviewStep: JobReviewStep = reviewStep ?? "summary_review";
   const isReviewContext = selectedReviewJob?.status === "needs_review" && reviewStep !== null;
   const showDetailModal = Boolean(detailModalOpen && workspace.selectedJobId);
-  const publicationJob = workspace.filteredJobs.find((job) => job.id === publicationJobId)
-    ?? (workspace.selectedJob?.id === publicationJobId ? workspace.selectedJob : null);
   const downloadJob = workspace.filteredJobs.find((job) => job.id === downloadJobId)
     ?? (workspace.selectedJob?.id === downloadJobId ? workspace.selectedJob : null);
-  const previewJob = workspace.filteredJobs.find((job) => job.id === previewJobId)
-    ?? (workspace.selectedJob?.id === previewJobId ? workspace.selectedJob : null);
-  const showPublicationModal = Boolean(publicationJobId && publicationJob);
-  const showPreviewModal = Boolean(previewJobId && previewJob);
   const showReviewOverlay = Boolean(reviewOverlayOpen && workspace.selectedJobId && isReviewContext && reviewStep);
   const createModalTitle =
     createEntryMode === "film_remix"
@@ -204,6 +219,49 @@ export function JobsPage() {
   const remixPendingTasks = remixProductionTasks.data?.pending_tasks ?? [];
   const remixCreatorLabel = remixProductionTasks.data?.creator_profile || "解说二创";
   const remixTaskBindingLabel = remixProductionTasks.data?.task_binding_id || remixProductionTasks.data?.id || "生产清单";
+  const releaseScopeJobs = workspace.searchMatchedJobs ?? workspace.filteredJobs;
+  const productionActiveJobs = releaseScopeJobs.filter(isProductionActiveJob);
+  const releaseBlockerJobs = releaseScopeJobs.filter(isReleaseBlockerJob);
+  const releaseCandidateJobs = releaseScopeJobs.filter(isReleaseCandidateJob);
+  const primaryReleaseCandidate = releaseCandidateJobs[0] ?? null;
+  const releaseFlowItems = [
+    {
+      key: "pending",
+      label: "待处理",
+      value: workspace.queueStats.pending,
+      detail: "等待入库校验或 worker 接管",
+      actionLabel: "看待处理",
+      icon: Clock3,
+      onClick: () => focusQueue("pending"),
+    },
+    {
+      key: "running",
+      label: "运行中",
+      value: productionActiveJobs.length,
+      detail: productionActiveJobs.length ? "正在生成、转写或包装" : "没有运行中任务",
+      actionLabel: "看运行中",
+      icon: PlayCircle,
+      onClick: () => focusQueue("running"),
+    },
+    {
+      key: "attention",
+      label: "需处理",
+      value: releaseBlockerJobs.length,
+      detail: releaseBlockerJobs.length ? "失败、缺素材或需要人工介入" : "暂无阻塞项",
+      actionLabel: "处理异常",
+      icon: AlertTriangle,
+      onClick: () => focusQueue("attention"),
+    },
+    {
+      key: "done",
+      label: "完成",
+      value: releaseCandidateJobs.length,
+      detail: releaseCandidateJobs.length ? "可转入成片审看" : "暂无完成输出",
+      actionLabel: "看完成输出",
+      icon: CheckCircle2,
+      onClick: () => focusQueue("done"),
+    },
+  ];
 
   const refreshJobsPage = () => {
     void workspace.refreshAll();
@@ -282,7 +340,6 @@ export function JobsPage() {
 
   const openJobReview = (jobId: string) => {
     const queuedJob = workspace.filteredJobs.find((job) => job.id === jobId) ?? (workspace.selectedJob?.id === jobId ? workspace.selectedJob : null);
-    setPublicationJobId(null);
     setDetailModalOpen(false);
     setReviewStepOverride(resolveJobReviewStep(queuedJob));
     setReviewOverlayOpen(true);
@@ -290,26 +347,10 @@ export function JobsPage() {
   };
 
   const openJobDetail = (jobId: string) => {
-    setPublicationJobId(null);
     setReviewOverlayOpen(false);
     setReviewStepOverride(null);
     setDetailModalOpen(true);
     workspace.setSelectedJobId(jobId);
-  };
-
-  const openJobPublication = (jobId: string) => {
-    setDetailModalOpen(false);
-    setReviewOverlayOpen(false);
-    setReviewStepOverride(null);
-    setPublicationJobId(jobId);
-  };
-
-  const openJobPreview = (jobId: string) => {
-    setDetailModalOpen(false);
-    setReviewOverlayOpen(false);
-    setReviewStepOverride(null);
-    setPublicationJobId(null);
-    setPreviewJobId(jobId);
   };
 
   const openJobDownload = (jobId: string) => {
@@ -420,6 +461,12 @@ export function JobsPage() {
       },
     });
 
+  const smartDirectorTextInputReady = Boolean(
+    workspace.upload.taskBrief.trim() || workspace.upload.videoDescription.trim(),
+  );
+  const createTaskInputReady =
+    workspace.upload.files.length > 0 || (createEntryMode === "smart_director" && smartDirectorTextInputReady);
+  const createTaskSubmitDisabled = !createTaskInputReady || workspace.uploadJob.isPending;
   const reviewNoticeClass = reviewNoticeTone === "error" ? "notice top-gap notice-error" : "notice top-gap";
 
   return (
@@ -428,15 +475,12 @@ export function JobsPage() {
         title={t("jobs.page.title")}
         actions={
           <div className="jobs-header-toolbar">
-            <input
-              className="input jobs-header-search-input"
-              value={workspace.keyword}
-              onChange={(event) => workspace.setKeyword(event.target.value)}
-              placeholder={t("jobs.page.searchPlaceholder")}
-            />
             <button type="button" className="button jobs-header-subtle-button" onClick={refreshJobsPage}>
               {t("jobs.page.refresh")}
             </button>
+            <Link className="button jobs-header-auto-task-button" to="/auto-tasks">
+              自动任务设置
+            </Link>
             <button type="button" className="button jobs-header-source-edit-button" onClick={() => openCreateModal("source_edit")}>
               全能剪辑
             </button>
@@ -450,53 +494,105 @@ export function JobsPage() {
         }
       />
 
-      <section className="jobs-dashboard-row">
-        <article className="jobs-dashboard-card">
-          <div className="jobs-dashboard-head">
-            <div>
-              <span className="jobs-dashboard-eyebrow">队列概览</span>
-              <h3>任务队列</h3>
-            </div>
-            {workspace.keyword.trim() ? <p>{`搜索“${workspace.keyword.trim()}”`}</p> : null}
+      <section className="jobs-release-cockpit" aria-label="制片队列工作台">
+        <div className="jobs-release-brief">
+          <span className="jobs-release-kicker">Production Queue</span>
+          <h3>生产状态带</h3>
+          <p>
+            {workspace.keyword.trim()
+              ? `当前按“${workspace.keyword.trim()}”筛选生产队列。`
+              : "围绕入库、排队、运行、需处理和完成输出推进，不在这里展开最终审看或平台发布细节。"}
+          </p>
+          <div className="jobs-release-command-row">
+            {primaryReleaseCandidate ? (
+              <Link className="button primary button-sm" to={`/final-review?job=${encodeURIComponent(primaryReleaseCandidate.id)}`}>
+                审看完成输出
+              </Link>
+            ) : (
+              <button type="button" className="button primary button-sm" onClick={() => focusQueue("done")}>
+                查看已完成
+              </button>
+            )}
+            <button type="button" className="button ghost button-sm" onClick={() => focusQueue("attention")}>
+              处理需处理 {workspace.queueStats.attention}
+            </button>
           </div>
-          <div className="jobs-dashboard-metrics">
-            {[
-              { key: "all" as const, label: "队列总数", value: workspace.queueStats.total, hint: "当前列表" },
-              { key: "pending" as const, label: "排队中", value: workspace.queueStats.pending, hint: "等待执行" },
-              { key: "running" as const, label: "运行中", value: workspace.queueStats.running, hint: "正在处理" },
-              { key: "done" as const, label: "已完成", value: workspace.queueStats.done, hint: "可回看结果" },
-            ].map((item) => (
+        </div>
+
+        <div className="jobs-release-flow" aria-label="生产状态带">
+          {releaseFlowItems.map((item, index) => {
+            const Icon = item.icon;
+            return (
               <button
                 key={item.key}
                 type="button"
-                className={classNames("jobs-dashboard-metric", workspace.queueFilter === item.key && "is-active")}
-                onClick={() => focusQueue(item.key)}
+                className={classNames("jobs-release-flow-step", `is-${item.key}`)}
+                onClick={item.onClick}
               >
-                <span>{item.label}</span>
+                <span className="jobs-release-flow-head">
+                  <span className="jobs-release-flow-index">{`0${index + 1}`}</span>
+                  <Icon size={16} strokeWidth={2.2} aria-hidden="true" />
+                </span>
+                <span className="jobs-release-flow-label">{item.label}</span>
                 <strong>{item.value}</strong>
-                <p>{item.hint}</p>
+                <small>{item.detail}</small>
+                <em>{item.actionLabel}</em>
               </button>
-            ))}
-          </div>
-        </article>
+            );
+          })}
+        </div>
 
-        <button
-          type="button"
-          className={classNames("jobs-attention-card", workspace.queueFilter === "attention" && "is-active")}
-          onClick={() => focusQueue("attention")}
-        >
-          <span className="jobs-dashboard-eyebrow">待处理事项</span>
-          <strong>{workspace.queueStats.attention}</strong>
-          <div className="jobs-attention-breakdown">
-            <span>待核对 {workspace.queueStats.needsReview}</span>
-            <span>失败 {workspace.queueStats.failed}</span>
-            <span>取消 {workspace.queueStats.cancelled}</span>
+        <section className="jobs-release-candidates" aria-label="完成输出">
+          <div className="jobs-release-panel-head">
+            <span>完成输出</span>
+            <strong>{releaseCandidateJobs.length} 条</strong>
           </div>
-        </button>
+          <div className="jobs-release-candidate-list">
+            {releaseCandidateJobs.slice(0, 3).map((job) => (
+              <article key={job.id} className="jobs-release-candidate-row">
+                <div>
+                  <strong>{job.source_name}</strong>
+                  <span>{job.publication_summary || job.content_summary || job.content_subject || "等待观众体验验收"}</span>
+                </div>
+                <div className="jobs-release-candidate-actions">
+                  <Link className="button ghost button-sm" to={`/final-review?job=${encodeURIComponent(job.id)}`}>
+                    审看
+                  </Link>
+                  <button type="button" className="button button-sm" onClick={() => openJobDetail(job.id)}>
+                    详情
+                  </button>
+                </div>
+              </article>
+            ))}
+            {!releaseCandidateJobs.length ? (
+              <div className="jobs-release-empty">暂无完成输出。先处理生产队列或异常项。</div>
+            ) : null}
+          </div>
+        </section>
+
+        <section className="jobs-release-audience-standard" aria-label="失败恢复">
+          <div className="jobs-release-panel-head">
+            <span>失败恢复</span>
+            <strong>{releaseBlockerJobs.length} 条</strong>
+          </div>
+          <div className="jobs-release-standard-list">
+            {releaseBlockerJobs.slice(0, 5).map((job) => (
+              <div key={job.id} className="jobs-release-standard-row">
+                <strong>{job.source_name}</strong>
+                <span>{job.error_message || job.status || "需要人工处理后重跑。"}</span>
+              </div>
+            ))}
+            {!releaseBlockerJobs.length ? <div className="jobs-release-empty">暂无失败恢复项。</div> : null}
+          </div>
+        </section>
       </section>
 
       <section className="jobs-queue-stage" ref={queueStageRef}>
         <div className="jobs-queue-filter-panel" aria-label="任务列表筛选">
+          <div className="jobs-filter-header">
+            <strong>筛选</strong>
+            <span>创作者 / 类型 / 状态 / 关键词 / 平台</span>
+          </div>
           <div className="jobs-filter-row">
             <span className="jobs-filter-label">任务标签</span>
             <div className="jobs-task-kind-filter" aria-label="任务标签筛选">
@@ -565,17 +661,22 @@ export function JobsPage() {
           isFetchingPage={workspace.jobs.isFetching}
           onPageChange={(page) => workspace.setJobsPage(Math.max(0, page))}
           errorMessage={workspace.jobs.isError ? (workspace.jobs.error as Error).message : undefined}
-          isOpeningFolder={workspace.openFolder.isPending}
           isCancelling={workspace.cancelJob.isPending}
           isRestarting={workspace.restartJob.isPending}
           isStartingRemixProduction={startRemixProductionJob.isPending}
           isDeleting={workspace.deleteJob.isPending}
+          headerActions={(
+            <div className="jobs-queue-title-actions">
+              <input
+                className="input jobs-header-search-input jobs-queue-search-input"
+                value={workspace.keyword}
+                onChange={(event) => workspace.setKeyword(event.target.value)}
+                placeholder={t("jobs.page.searchPlaceholder")}
+              />
+            </div>
+          )}
           onSelect={openJobDetail}
           onOpenReview={openJobReview}
-          onPublish={openJobPublication}
-          onPreview={openJobPreview}
-          onOpenFolder={(jobId) => workspace.openFolder.mutate(jobId)}
-          onDownload={openJobDownload}
           onCancel={confirmAndCancelJob}
           onRestart={confirmAndRestartJob}
           onStartRemixProduction={startRemixProduction}
@@ -659,7 +760,7 @@ export function JobsPage() {
             <button
               type="button"
               className="button jobs-create-submit-button secondary"
-              disabled={workspace.upload.files.length === 0 || workspace.uploadJob.isPending}
+              disabled={createTaskSubmitDisabled}
               onClick={() => submitCreateJob("manual")}
             >
               {workspace.uploadJob.isPending ? t("jobs.upload.submitting") : "创建任务"}
@@ -667,7 +768,7 @@ export function JobsPage() {
             <button
               type="button"
               className="button primary jobs-create-submit-button"
-              disabled={workspace.upload.files.length === 0 || workspace.uploadJob.isPending}
+              disabled={createTaskSubmitDisabled}
               onClick={() => submitCreateJob("immediate")}
             >
               {workspace.uploadJob.isPending ? t("jobs.upload.submitting") : "开始剪辑"}
@@ -695,18 +796,6 @@ export function JobsPage() {
               />
             </section>
           </div>
-        </section>
-      </JobCreateModal>
-
-      <JobCreateModal
-        open={showPublicationModal}
-        title="一键发布"
-        onClose={() => setPublicationJobId(null)}
-      >
-        <section className="jobs-create-modal-content">
-          {publicationJob ? (
-            <JobPublicationPanel job={publicationJob} onCancel={() => setPublicationJobId(null)} />
-          ) : null}
         </section>
       </JobCreateModal>
 
@@ -795,53 +884,6 @@ export function JobsPage() {
           onTriggerSubtitleRerun={triggerSubtitleRerun}
         />
       </JobDetailModal>
-
-      <JobCreateModal
-        open={showPreviewModal}
-        title={previewJob?.source_name ?? "成片预览"}
-        onClose={() => setPreviewJobId(null)}
-      >
-        <section className="jobs-create-modal-content job-video-preview-modal">
-          <div className="jobs-stage-head">
-            <div>
-              <h3>成片预览</h3>
-              <p>{previewJob?.source_name}</p>
-            </div>
-            <div className="jobs-stage-meta">
-              <span>状态</span>
-              <strong>{previewJob?.status === "done" ? "可播放" : "不可播放"}</strong>
-            </div>
-          </div>
-          {previewJob ? (
-            <>
-              <video
-                key={previewJob.id}
-                className="job-video-preview-player"
-                src={api.jobRenderedFileUrl(previewJob.id)}
-                controls
-                preload="metadata"
-                playsInline
-              />
-              <div className="toolbar job-video-preview-actions">
-                <button
-                  className="button ghost button-sm"
-                  type="button"
-                  onClick={() => window.open(api.jobRenderedFileUrl(previewJob.id), "_blank", "noopener,noreferrer")}
-                >
-                  新窗口打开
-                </button>
-                <button
-                  className="button button-sm"
-                  type="button"
-                  onClick={() => setDownloadJobId(previewJob.id)}
-                >
-                  {t("jobs.actions.download")}
-                </button>
-              </div>
-            </>
-          ) : null}
-        </section>
-      </JobCreateModal>
 
       <JobReviewOverlay
         open={showReviewOverlay}

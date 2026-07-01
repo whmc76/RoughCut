@@ -131,7 +131,7 @@ def test_job_publication_render_output_prefers_unified_enhanced_variant(tmp_path
     assert selected.output_path == str(enhanced.resolve())
 
 
-def test_job_publication_render_output_keeps_legacy_avatar_fallback(tmp_path) -> None:
+def test_job_publication_render_output_prefers_packaged_before_legacy_avatar_fallback(tmp_path) -> None:
     packaged = tmp_path / "sample_成片.mp4"
     avatar = tmp_path / "sample_数字人版.mp4"
     packaged.write_bytes(b"packaged")
@@ -144,6 +144,23 @@ def test_job_publication_render_output_keeps_legacy_avatar_fallback(tmp_path) ->
         render_output,
         {
             "packaged_mp4": str(packaged),
+            "avatar_mp4": str(avatar),
+            "avatar_result": {"status": "done"},
+        },
+    )
+
+    assert selected is render_output
+
+
+def test_job_publication_render_output_uses_legacy_avatar_only_without_standard(tmp_path) -> None:
+    avatar = tmp_path / "sample_数字人版.mp4"
+    avatar.write_bytes(b"avatar")
+    job = Job(enhancement_modes=["ai_effects", "avatar_commentary"])
+
+    selected = jobs_api._select_job_publication_render_output(
+        job,
+        None,
+        {
             "avatar_mp4": str(avatar),
             "avatar_result": {"status": "done"},
         },

@@ -7,12 +7,19 @@ CapabilityState = str
 
 CAPABILITY_KEYS: Final[tuple[str, ...]] = (
     "speech_density_trim",
+    "reference_style_analysis",
+    "source_media_inspection",
     "screen_focus",
     "chapter_cards",
+    "stock_footage_retrieval",
+    "generative_scene_plan",
     "local_broll_insert",
     "local_audio_cues",
+    "soundtrack_audio_mix",
     "highlight_window_selection",
     "multi_material_assembly",
+    "cost_budget_governance",
+    "delivery_quality_governance",
 )
 
 VALID_CAPABILITY_STATES: Final[set[str]] = {
@@ -28,6 +35,16 @@ CAPABILITY_METADATA: Final[dict[str, dict[str, str]]] = {
         "layer": "editorial",
         "description": "Single editorial authority for speech cleanup, pacing compression, and low-risk smart delete candidates.",
     },
+    "reference_style_analysis": {
+        "label": "参考视频风格分析",
+        "layer": "candidate",
+        "description": "Analyze a reference or source clip for hook structure, pacing, scene rhythm, caption style, and reusable creative constraints.",
+    },
+    "source_media_inspection": {
+        "label": "源素材体检",
+        "layer": "candidate",
+        "description": "Probe uploaded media, scene changes, keyframes, audio continuity, and production implications before edit planning.",
+    },
     "screen_focus": {
         "label": "教程画面聚焦",
         "layer": "packaging",
@@ -37,6 +54,16 @@ CAPABILITY_METADATA: Final[dict[str, dict[str, str]]] = {
         "label": "章节卡片包装",
         "layer": "packaging",
         "description": "Section or step cards derived from local structure and transcript boundaries.",
+    },
+    "stock_footage_retrieval": {
+        "label": "开放素材检索",
+        "layer": "candidate",
+        "description": "Plan retrieval of royalty-safe B-roll, stills, archive clips, and creator-approved external support material.",
+    },
+    "generative_scene_plan": {
+        "label": "生成式分镜成片",
+        "layer": "candidate",
+        "description": "Turn a prompt or script into scene beats, asset requirements, generated media slots, and render-runtime constraints.",
     },
     "local_broll_insert": {
         "label": "本地插片组装",
@@ -48,6 +75,11 @@ CAPABILITY_METADATA: Final[dict[str, dict[str, str]]] = {
         "layer": "packaging",
         "description": "Use locally uploaded BGM or SFX in packaged variants.",
     },
+    "soundtrack_audio_mix": {
+        "label": "音乐音效混音",
+        "layer": "audio",
+        "description": "Plan narration, BGM, SFX, ducking, fades, loudness, and audio balance as one soundtrack contract.",
+    },
     "highlight_window_selection": {
         "label": "高光窗口提炼",
         "layer": "candidate",
@@ -57,6 +89,16 @@ CAPABILITY_METADATA: Final[dict[str, dict[str, str]]] = {
         "label": "多素材组装",
         "layer": "candidate",
         "description": "Assemble multiple uploaded materials into one composed timeline.",
+    },
+    "cost_budget_governance": {
+        "label": "成本预算治理",
+        "layer": "candidate",
+        "description": "Estimate tool/provider cost, surface paid-vs-local tradeoffs, and require confirmation before expensive generation.",
+    },
+    "delivery_quality_governance": {
+        "label": "交付质量门",
+        "layer": "validation",
+        "description": "Validate output duration, audio, frame samples, subtitle timing, delivery promises, and render diagnostics before handoff.",
     },
 }
 

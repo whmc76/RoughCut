@@ -15,6 +15,7 @@ from typing import Any
 from roughcut.host.codex_bridge import run_codex_exec
 from roughcut.host.file_manager import open_in_file_manager
 from roughcut.host.codex_imagegen_runner import fulfill_codex_imagegen_request
+from roughcut.host.publication_browser import open_publication_entry_url
 
 _MATERIALIZE_SUFFIXES = {
     ".mp4",
@@ -87,6 +88,7 @@ def _make_handler(expected_token: str):
                 "/v1/host/sync-smart-copy",
                 "/v1/host/complete-codex-imagegen",
                 "/v1/host/open-path",
+                "/v1/host/open-publication-entry",
                 "/v1/host/social-auto-upload-login",
                 "/v1/host/social-auto-upload-check",
                 "/v1/host/social-auto-upload-dashboard",
@@ -114,6 +116,8 @@ def _make_handler(expected_token: str):
                     result = complete_codex_imagegen_request(payload)
                 elif normalized_path == "/v1/host/open-path":
                     result = open_host_path(payload)
+                elif normalized_path == "/v1/host/open-publication-entry":
+                    result = open_publication_entry(payload)
                 elif normalized_path == "/v1/host/social-auto-upload-login":
                     result = start_social_auto_upload_login(payload)
                 elif normalized_path == "/v1/host/social-auto-upload-check":
@@ -280,6 +284,18 @@ def open_host_path(payload: dict[str, Any]) -> dict[str, Any]:
         "path": str(target_path.resolve()),
         "kind": "file" if target_path.is_file() else "folder",
     }
+
+
+def open_publication_entry(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_url = str(payload.get("url") or "").strip()
+    browser_binding = payload.get("browser_binding")
+    result = open_publication_entry_url(
+        raw_url,
+        browser_binding=browser_binding if isinstance(browser_binding, dict) else {},
+        allow_host_bridge=False,
+    )
+    result["launch_source"] = "codex_host_bridge"
+    return result
 
 
 def start_social_auto_upload_login(payload: dict[str, Any]) -> dict[str, Any]:

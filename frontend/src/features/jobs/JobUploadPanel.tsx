@@ -43,21 +43,35 @@ function jobFlowModeOptions(t: (key: string) => string): SelectOption[] {
 
 const AGENT_CAPABILITY_DESCRIPTIONS: Record<string, string> = {
   speech_density_trim: "启用语气词、重复、停顿阈值和智能删减等节奏控制。",
+  reference_style_analysis: "分析参考视频或源片的钩子、节奏、镜头语言、字幕样式和可复用结构。",
+  source_media_inspection: "在剪辑前体检源素材、场景切换、关键帧、音频连续性和生产风险。",
   screen_focus: "面向教程类素材，编排局部放大、热点强调和屏幕重点跟随。",
   chapter_cards: "根据段落结构和字幕边界生成章节卡片、步骤提示和过渡包装。",
+  stock_footage_retrieval: "规划免版权或创作者授权的补充素材、开放档案和 B-roll 检索。",
+  generative_scene_plan: "把脚本或创意拆成分镜、资产需求、生成媒体槽位和渲染运行时约束。",
   local_broll_insert: "把本地上传的补充视频或图片作为插片素材编排进成片版本。",
   local_audio_cues: "把本地上传的背景音乐或音效编排到包装节奏里。",
+  soundtrack_audio_mix: "统一规划旁白、BGM、音效、闪避、淡入淡出、响度和最终混音。",
   highlight_window_selection: "从长素材中提炼高光窗口，供短视频或精华版剪辑使用。",
   multi_material_assembly: "将多个上传素材组合成一条连续叙事时间线。",
+  cost_budget_governance: "在调用生成或外部能力前估算成本、展示本地/付费取舍，并保留确认点。",
+  delivery_quality_governance: "输出前检查时长、音频、抽帧、字幕时间轴、交付承诺和渲染诊断。",
 };
 
 const FILM_REMIX_CAPABILITY_KEYS = [
+  "reference_style_analysis",
+  "source_media_inspection",
   "highlight_window_selection",
   "multi_material_assembly",
+  "stock_footage_retrieval",
+  "generative_scene_plan",
   "local_broll_insert",
   "chapter_cards",
   "local_audio_cues",
+  "soundtrack_audio_mix",
   "speech_density_trim",
+  "cost_budget_governance",
+  "delivery_quality_governance",
 ];
 
 const FILM_REMIX_ENHANCEMENT_KEYS = new Set(["ai_effects"]);
@@ -85,6 +99,14 @@ const FILM_REMIX_MODE_OPTIONS: Array<{ value: string; label: string; description
 ];
 
 const FILM_REMIX_CAPABILITY_COPY: Record<string, { label: string; description: string }> = {
+  reference_style_analysis: {
+    label: "参考风格拆解",
+    description: "提取参考片或原片的开头钩子、剪辑节奏、字幕样式、情绪走向和可复用结构。",
+  },
+  source_media_inspection: {
+    label: "原片素材体检",
+    description: "先探测源片时长、场景、关键帧、音频和可剪风险，再决定解说结构与镜头策略。",
+  },
   highlight_window_selection: {
     label: "原片关键镜头匹配",
     description: "根据脚本段落、人物、场景、动作和情绪强度，从原片里自动提取最贴合的画面。",
@@ -97,6 +119,14 @@ const FILM_REMIX_CAPABILITY_COPY: Record<string, { label: string; description: s
     label: "补充画面插入",
     description: "把上传的参考图、补充片段或素材库画面作为解释、转场和情绪补充镜头。",
   },
+  stock_footage_retrieval: {
+    label: "开放素材补镜",
+    description: "需要解释性或氛围镜头时，规划免版权素材、开放档案和可授权 B-roll 检索。",
+  },
+  generative_scene_plan: {
+    label: "生成式分镜补足",
+    description: "把用户想法或解说文案拆成分镜、镜头资产需求、生成图/视频槽位和成片节奏。",
+  },
   chapter_cards: {
     label: "解说段落包装",
     description: "按脚本结构生成开头钩子、段落提示、观点强调和转场包装。",
@@ -105,9 +135,21 @@ const FILM_REMIX_CAPABILITY_COPY: Record<string, { label: string; description: s
     label: "BGM 与音效节奏",
     description: "根据解说节奏、段落转折和画面情绪自动安排背景音乐与音效提示。",
   },
+  soundtrack_audio_mix: {
+    label: "成片混音编排",
+    description: "统一处理旁白、原片声、BGM、音效、闪避、淡入淡出和响度平衡。",
+  },
   speech_density_trim: {
     label: "解说节奏压缩",
     description: "在不破坏脚本含义的前提下压缩冗余停顿，让旁白和画面衔接更紧。",
+  },
+  cost_budget_governance: {
+    label: "生成成本控制",
+    description: "涉及外部生成或素材检索时先估算成本，区分免费、本地和付费路径。",
+  },
+  delivery_quality_governance: {
+    label: "交付质量门",
+    description: "成片交付前检查音频、抽帧、字幕、时长和交付承诺，避免坏片进入发布。",
   },
 };
 
@@ -183,6 +225,7 @@ function capabilityLayerLabel(layer: string): string {
   if (layer === "packaging") return "包装";
   if (layer === "candidate") return "候选";
   if (layer === "audio") return "音频";
+  if (layer === "validation") return "质检";
   return layer || "能力";
 }
 
@@ -372,8 +415,8 @@ export function JobUploadPanel({
       <div className="job-upload-layout">
         <section className="job-upload-source-card">
           <label className="job-upload-file-drop">
-            <span className="job-upload-file-kicker">{t("jobs.upload.file")}</span>
-            <strong>{upload.files.length > 0 ? t("jobs.upload.selectedCount").replace("{count}", String(upload.files.length)) : "选择视频素材"}</strong>
+            <span className="job-upload-file-kicker">{isSmartDirector ? "参考素材（可选）" : t("jobs.upload.file")}</span>
+            <strong>{upload.files.length > 0 ? t("jobs.upload.selectedCount").replace("{count}", String(upload.files.length)) : isSmartDirector ? "可不上传，直接用文字创作" : "选择视频素材"}</strong>
             <input
               className="input"
               type="file"
@@ -381,7 +424,7 @@ export function JobUploadPanel({
               multiple
               onChange={(event) => onChange({ ...upload, files: Array.from(event.target.files ?? []) })}
             />
-            <span className="muted">{t("jobs.upload.fileHint")}</span>
+            <span className="muted">{isSmartDirector ? "上传素材时会作为参考；不上传时按下方创意要求生成成片规划。" : t("jobs.upload.fileHint")}</span>
           </label>
           <section className="job-upload-preview" aria-label={t("jobs.upload.previewTitle")}>
             <div className="job-upload-preview-header">

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactNode } from "react";
@@ -58,9 +58,8 @@ afterEach(() => {
   window.localStorage.clear();
 });
 
-describe("JobQueueTable preview action", () => {
-  it("shows an inline preview action for completed jobs without selecting the row", () => {
-    const onPreview = vi.fn();
+describe("JobQueueTable handoff actions", () => {
+  it("puts completed jobs' review action first without queue-level file or publish actions", () => {
     const onSelect = vi.fn();
 
     renderTable(
@@ -69,19 +68,18 @@ describe("JobQueueTable preview action", () => {
         selectedJobId={null}
         isLoading={false}
         onSelect={onSelect}
-        onPreview={onPreview}
-        onOpenFolder={vi.fn()}
-        onDownload={vi.fn()}
         onCancel={vi.fn()}
         onRestart={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "播放" }));
-
-    expect(onPreview).toHaveBeenCalledWith("job-1");
-    expect(onSelect).not.toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "去审看" })).toHaveAttribute("href", "/final-review?job=job-1");
+    const actions = screen.getAllByRole("link").map((link) => link.getAttribute("aria-label") ?? link.textContent);
+    expect(actions[0]).toBe("去审看");
+    expect(screen.queryByRole("link", { name: "发布交接" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开文件夹" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "下载" })).not.toBeInTheDocument();
   });
 
   it("does not show the preview action before a job is complete", () => {
@@ -91,14 +89,13 @@ describe("JobQueueTable preview action", () => {
         selectedJobId={null}
         isLoading={false}
         onSelect={vi.fn()}
-        onOpenFolder={vi.fn()}
-        onDownload={vi.fn()}
         onCancel={vi.fn()}
         onRestart={vi.fn()}
         onDelete={vi.fn()}
       />,
     );
 
-    expect(screen.queryByRole("button", { name: "播放" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "去审看" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "发布交接" })).not.toBeInTheDocument();
   });
 });

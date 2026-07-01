@@ -39,6 +39,7 @@ def build_avatar_commentary_plan(
         "voice_provider": settings.voice_provider,
         "source_name": source_name,
         "presenter_id": str(presenter_id or "").strip(),
+        "allow_plain_fallback": True,
         "layout_template": settings.avatar_layout_template,
         "safe_margin": settings.avatar_safe_margin,
         "overlay_scale": settings.avatar_overlay_scale,

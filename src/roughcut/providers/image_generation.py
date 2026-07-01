@@ -63,7 +63,7 @@ def resolve_codex_imagegen_runner_config(settings: Any | None = None) -> dict[st
         "model": model or "gpt-5.4-mini",
         "reasoning_effort": effort,
         "role": "codex_exec_agent",
-        "note": "This config controls the Codex text agent that invokes image_generation; it is not the underlying image model.",
+        "note": "This config controls the Codex text agent that invokes built-in image generation.",
     }
 
 
@@ -81,7 +81,7 @@ async def generate_edited_cover_image(
     director_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
-    backend = str(getattr(settings, "intelligent_copy_cover_image_backend", "") or "codex_builtin").strip().lower()
+    backend = "codex_builtin"
     if backend in {"", "codex", "codex_cli", "codex_imagegen", "codex_builtin"}:
         final_path = final_output_path or output_path
         if request_path is not None and _codex_imagegen_request_completed(
@@ -220,31 +220,31 @@ def _write_codex_imagegen_request(
         "codex_runner": runner_config,
         "codex_imagegen_size": size,
         "cover_director_policy": dict(director_policy or {
-            "direction_version": "local_overlay_required_v1",
-            "codex_role": "render_cover_base_for_local_overlay",
-            "goal": "Let Codex image generation produce a clean cover base that is safe for deterministic local typography overlay.",
-            "typography_owner": "local_post_overlay",
-            "forbidden_extra_visual_text": [
-                "subtitles",
-                "watermarks",
-                "pseudo logos unrelated to the requested brand",
-                "any readable Chinese or English text",
-                "any readable numbers or pseudo text",
+            "direction_version": "full_cover_codex_v1",
+            "codex_role": "render_final_cover_with_integrated_typography",
+            "goal": "Let Codex image generation produce the final text-integrated publishable cover bitmap in one pass.",
+            "typography_owner": "codex_full_cover",
+            "allowed_visual_text": ["required_title_lines"],
+            "clean_visual_text_scope": [
+                "subtitles_absent",
+                "watermarks_absent",
+                "unrelated_pseudo_logos_absent",
+                "unrelated_readable_text_absent",
             ],
             "completion_requires": [
                 "A real bitmap generated with Codex built-in image_gen/edit mode.",
-                "The bitmap is a clean cover base, not the final text-integrated cover.",
-                "No extra unrequested typography, subtitles, watermarks, or unrelated pseudo logos appear in the bitmap.",
-                "Key subject stays complete and readable after later local typography placement.",
+                "The bitmap is the final cover with title typography already integrated.",
+                "The visual text scope is limited to required_title_lines.",
+                "Unrelated readable visual text is absent.",
                 "The generated bitmap copied to output_path before marking this request completed.",
             ],
         }),
         "instructions": (
             "Use Codex built-in image_gen/edit mode with source_image_path as the primary hero-angle anchor from the same-product reference pack. "
             "When reference_image_paths is present, treat the full ordered set as the allowed same-product multi-angle reference pack. "
-            "Treat codex_runner.model as the Codex execution agent model only, not as the underlying image model. "
-            "Do not use the OpenAI Images API fallback unless explicitly requested. "
-            "Pass the prompt as the concise image-generation brief for a text-free cover base; local post-processing owns typography. "
+            "Treat codex_runner.model as the Codex execution agent model; the image model is selected by Codex built-in generation. "
+            "Use the Codex built-in image generation path for this request. "
+            "Pass the prompt as the concise image-generation brief for the final text-integrated publishable cover. "
             "Copy the selected generated bitmap into output_path."
         ),
     }
@@ -333,7 +333,7 @@ def _codex_imagegen_request_completed(
     if not bool(payload.get("generated_by_codex_bridge")):
         return False
     recorded_output = str(payload.get("output_path") or "").strip()
-    if recorded_output and Path(recorded_output) != output_path:
+    if recorded_output and not _codex_runtime_paths_equivalent(recorded_output, output_path):
         return False
     recorded_result = str(payload.get("result_path") or "").strip()
     if recorded_result and not codex_imagegen_result_path_is_allowed(
@@ -392,6 +392,8 @@ def mark_codex_imagegen_request_completed(
 
 
 def codex_imagegen_result_path_is_allowed(result_path: Path, *, output_path: Path) -> bool:
+    if _codex_runtime_paths_equivalent(result_path, output_path):
+        return True
     try:
         resolved_result = Path(result_path).expanduser().resolve()
         resolved_output = Path(output_path).expanduser().resolve()
@@ -400,6 +402,33 @@ def codex_imagegen_result_path_is_allowed(result_path: Path, *, output_path: Pat
     if resolved_result == resolved_output:
         return True
     return any(_path_is_relative_to(resolved_result, root) for root in codex_generated_image_roots())
+
+
+def _codex_runtime_paths_equivalent(left: str | Path, right: str | Path) -> bool:
+    left_key = _codex_runtime_mount_key(left)
+    right_key = _codex_runtime_mount_key(right)
+    if left_key and right_key:
+        return left_key == right_key
+    try:
+        return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+    except OSError:
+        return False
+
+
+def _codex_runtime_mount_key(value: str | Path) -> str:
+    raw = str(value or "").strip().strip('"')
+    if not raw:
+        return ""
+    normalized = raw.replace("\\", "/").strip()
+    normalized_lower = normalized.lower()
+    for prefix in ("/app/data/", "app/data/"):
+        if normalized_lower.startswith(prefix):
+            return f"app-data:{normalized[len(prefix):].strip('/').lower()}"
+    marker = "/data/runtime/"
+    marker_index = normalized_lower.find(marker)
+    if marker_index >= 0:
+        return f"app-data:{normalized[marker_index + len(marker):].strip('/').lower()}"
+    return ""
 
 
 def codex_generated_image_roots() -> list[Path]:

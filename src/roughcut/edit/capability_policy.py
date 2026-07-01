@@ -99,6 +99,8 @@ def resolve_default_capability_states(
 
     if strategy_type == "information_density":
         states["speech_density_trim"] = "auto_apply"
+        states["source_media_inspection"] = "auto_apply"
+        states["delivery_quality_governance"] = "auto_apply"
         if content_kind == "tutorial":
             states["screen_focus"] = "suggest"
             states["chapter_cards"] = "suggest"
@@ -112,25 +114,44 @@ def resolve_default_capability_states(
             states["local_broll_insert"] = "suggest"
         if music_allowed:
             states["local_audio_cues"] = "suggest"
+            states["soundtrack_audio_mix"] = "suggest"
     elif strategy_type == "step_demonstration":
         states["speech_density_trim"] = "auto_apply"
+        states["source_media_inspection"] = "auto_apply"
         states["screen_focus"] = "auto_apply"
         states["chapter_cards"] = "suggest"
         states["local_broll_insert"] = "suggest"
         states["local_audio_cues"] = "suggest"
+        states["soundtrack_audio_mix"] = "suggest"
+        states["delivery_quality_governance"] = "auto_apply"
     elif strategy_type == "experience_and_mood":
+        states["reference_style_analysis"] = "suggest"
+        states["source_media_inspection"] = "auto_apply"
         states["speech_density_trim"] = "suggest"
         states["chapter_cards"] = "disabled"
         states["local_broll_insert"] = "suggest"
         states["local_audio_cues"] = "suggest"
+        states["soundtrack_audio_mix"] = "suggest"
+        states["delivery_quality_governance"] = "auto_apply"
     elif strategy_type == "event_highlight":
+        states["reference_style_analysis"] = "suggest"
+        states["source_media_inspection"] = "auto_apply"
         states["speech_density_trim"] = "suggest"
         states["highlight_window_selection"] = "suggest"
         states["local_broll_insert"] = "suggest"
         states["local_audio_cues"] = "suggest"
+        states["soundtrack_audio_mix"] = "suggest"
+        states["delivery_quality_governance"] = "auto_apply"
     elif strategy_type == "narrative_assembly":
+        states["reference_style_analysis"] = "suggest"
+        states["source_media_inspection"] = "auto_apply"
+        states["stock_footage_retrieval"] = "suggest"
+        states["generative_scene_plan"] = "suggest"
         states["local_broll_insert"] = "suggest"
         states["local_audio_cues"] = "suggest"
+        states["soundtrack_audio_mix"] = "suggest"
         states["multi_material_assembly"] = "manual_required"
+        states["cost_budget_governance"] = "manual_required"
+        states["delivery_quality_governance"] = "auto_apply"
 
     return states

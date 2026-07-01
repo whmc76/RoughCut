@@ -59,12 +59,15 @@ def test_classification_tags_can_select_step_demonstration_without_content_kind(
 
     assert payload["strategy_type"] == "step_demonstration"
     assert payload["classification"]["primary_type"] == "screen_recording"
-    assert payload["pipeline_plan"]["enabled_features"] == [
+    assert {
         "chapter_cards",
+        "delivery_quality_governance",
         "screen_focus",
+        "source_media_inspection",
+        "source_media_review",
         "speech_density_trim",
         "subtitle_timeline_projection",
-    ]
+    }.issubset(set(payload["pipeline_plan"]["enabled_features"]))
     assert payload["capabilities"]["screen_focus"] == "auto_apply"
 
 
@@ -132,9 +135,14 @@ def test_avatar_commentary_classification_selects_narrative_assembly_plan() -> N
     assert payload["pipeline_plan"]["production_mode"] == "remix"
     assert "avatar_render" in payload["pipeline_plan"]["enabled_features"]
     assert "tts_generation" in payload["pipeline_plan"]["enabled_features"]
+    assert "stock_footage_retrieval" in payload["pipeline_plan"]["enabled_features"]
+    assert "budget_cost_estimate" in payload["pipeline_plan"]["enabled_features"]
+    assert "soundtrack_audio_mix" in payload["pipeline_plan"]["enabled_features"]
     assert payload["pipeline_plan"]["strategy_policy"]["cut_policy"]["basis"] == "script_segment"
     assert payload["pipeline_plan"]["strategy_policy"]["review_policy"]["storyboard_review"] == "required"
     assert payload["pipeline_plan"]["strategy_policy"]["render_validation_policy"]["check_storyboard_alignment"] is True
+    assert payload["pipeline_plan"]["strategy_policy"]["capability_defaults"]["generative_scene_plan"] == "suggest"
+    assert payload["pipeline_plan"]["strategy_policy"]["capability_defaults"]["cost_budget_governance"] == "manual_required"
     assert "storyboard_review_required" in payload["pipeline_plan"]["review_gates"]
     assert "timeline_preview_required" in payload["pipeline_plan"]["review_gates"]
     assert payload["review_gate_status"]["blocking"] is True
@@ -144,6 +152,10 @@ def test_avatar_commentary_classification_selects_narrative_assembly_plan() -> N
         "timeline_preview",
     }
     assert payload["capabilities"]["multi_material_assembly"] == "manual_required"
+    assert payload["capabilities"]["reference_style_analysis"] == "suggest"
+    assert payload["capabilities"]["source_media_inspection"] == "auto_apply"
+    assert payload["capabilities"]["cost_budget_governance"] == "manual_required"
+    assert payload["capabilities"]["delivery_quality_governance"] == "auto_apply"
 
 
 def test_explicit_strategy_profile_wins_over_classification_tags() -> None:
@@ -186,6 +198,8 @@ def test_pipeline_plan_uses_strategy_registry_for_information_density_policy() -
     assert plan["strategy_policy"]["cut_policy"]["edge_padding_ms"] == [50, 120]
     assert plan["strategy_policy"]["render_validation_policy"]["check_cut_boundaries"] is True
     assert "retake_and_silence_review" in plan["enabled_features"]
+    assert "source_media_review" in plan["enabled_features"]
+    assert "post_render_self_review" in plan["enabled_features"]
     assert "manual_cut_review_recommended" in plan["review_gates"]
     assert payload["review_gate_status"]["blocking"] is False
     assert payload["review_gate_status"]["recommended_gate_count"] == 1
@@ -304,6 +318,8 @@ def test_step_demonstration_auto_applies_focus_and_downgrades_in_assist_mode() -
     assert payload["capabilities"]["chapter_cards"] == "suggest"
     assert payload["capabilities"]["local_broll_insert"] == "suggest"
     assert payload["capabilities"]["local_audio_cues"] == "suggest"
+    assert payload["capabilities"]["source_media_inspection"] == "suggest"
+    assert payload["capabilities"]["delivery_quality_governance"] == "suggest"
 
 
 def test_missing_local_assets_disable_local_packaging_capabilities() -> None:
@@ -316,6 +332,8 @@ def test_missing_local_assets_disable_local_packaging_capabilities() -> None:
 
     assert payload["capabilities"]["local_broll_insert"] == "disabled"
     assert payload["capabilities"]["local_audio_cues"] == "disabled"
+    assert payload["capabilities"]["stock_footage_retrieval"] == "disabled"
+    assert payload["capabilities"]["soundtrack_audio_mix"] == "suggest"
     assert payload["capabilities"]["speech_density_trim"] == "suggest"
 
 

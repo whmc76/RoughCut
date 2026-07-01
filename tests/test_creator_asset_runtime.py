@@ -277,6 +277,29 @@ def test_missing_creator_avatar_binding_is_skipped_not_degraded() -> None:
     }
 
 
+def test_avatar_presenter_binding_uses_packaging_overlay_defaults_when_config_is_sparse() -> None:
+    plan = {
+        "mode": "full_track_audio_passthrough",
+        "provider": "heygem",
+    }
+    binding = {
+        "source": "settings_avatar_presenter_id",
+        "presenter_id": "presenter.mp4",
+    }
+
+    pipeline_steps._apply_avatar_presenter_binding_to_plan(
+        plan,
+        binding=binding,
+        packaging_config={},
+    )
+
+    assert plan["integration_mode"] == "picture_in_picture"
+    assert plan["overlay_position"] == packaging_library.DEFAULT_CONFIG["avatar_overlay_position"]
+    assert plan["overlay_corner_radius"] == packaging_library.DEFAULT_CONFIG["avatar_overlay_corner_radius"]
+    assert plan["overlay_border_width"] == packaging_library.DEFAULT_CONFIG["avatar_overlay_border_width"]
+    assert plan["overlay_border_color"] == packaging_library.DEFAULT_CONFIG["avatar_overlay_border_color"]
+
+
 def test_resolve_packaging_plan_for_job_prefers_creator_assets(monkeypatch, tmp_path: Path) -> None:
     intro = tmp_path / "intro.mp4"
     intro.write_bytes(b"intro")
@@ -346,9 +369,11 @@ def test_resolve_packaging_plan_for_job_prefers_creator_assets(monkeypatch, tmp_
     assert set(plan["music"]["candidate_paths"]) == {music.as_posix(), music_b.as_posix()}
 
 
-def test_creator_packaging_asset_types_require_existing_intro_music_and_logo(tmp_path: Path) -> None:
+def test_creator_packaging_asset_types_require_existing_intro_outro_music_and_logo(tmp_path: Path) -> None:
     intro = tmp_path / "intro.mp4"
     intro.write_bytes(b"intro")
+    outro = tmp_path / "outro.mp4"
+    outro.write_bytes(b"outro")
     music = tmp_path / "music.mp3"
     music.write_bytes(b"music")
     logo = tmp_path / "logo.png"
@@ -356,14 +381,14 @@ def test_creator_packaging_asset_types_require_existing_intro_music_and_logo(tmp
 
     assets = [
         SimpleNamespace(asset_type="intro", stored_path=intro),
+        SimpleNamespace(asset_type="outro", stored_path=outro),
         SimpleNamespace(asset_type="music_library", stored_path=music),
         SimpleNamespace(asset_type="logo", stored_path=logo),
-        SimpleNamespace(asset_type="outro", stored_path=tmp_path / "missing-outro.mp4"),
     ]
 
-    assert creator_packaging_asset_types(assets) == {"intro", "music", "watermark"}
+    assert creator_packaging_asset_types(assets) == {"intro", "outro", "music", "watermark"}
     assert creator_has_complete_packaging_assets(assets) is True
-    assert creator_has_complete_packaging_assets(assets[:2]) is False
+    assert creator_has_complete_packaging_assets([asset for asset in assets if asset.asset_type != "outro"]) is False
 
 
 def test_packaging_creator_card_inference_requires_same_source_logo(tmp_path: Path) -> None:

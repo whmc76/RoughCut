@@ -33,6 +33,7 @@ from roughcut.avatar.runtime import (
     prepare_voice_sample_artifacts,
 )
 from roughcut.config import get_settings
+from roughcut.host.publication_browser import open_publication_entry_url
 from roughcut.media.probe import probe
 from roughcut.naming import (
     AVATAR_CAPABILITY_GENERATION,
@@ -75,6 +76,15 @@ class PublicationBrowserLoginMatchIn(BaseModel):
     cdp_base_url: str | None = None
 
 
+class PublicationEntryOpenIn(BaseModel):
+    url: str
+    platform: str | None = None
+    account_label: str | None = None
+    credential_ref: str | None = None
+    browser_profile_id: str | None = None
+    browser_binding: dict[str, Any] | None = None
+
+
 @router.get("", response_model=AvatarMaterialLibraryOut)
 async def get_avatar_materials():
     payload = build_avatar_material_requirements()
@@ -109,6 +119,24 @@ def get_avatar_publication_profiles():
         if str(profile.get("id") or "").strip()
     ]
     return {"profiles": profiles}
+
+
+@router.post("/publication/open-entry")
+def open_publication_entry(body: PublicationEntryOpenIn):
+    try:
+        binding = normalize_publication_browser_binding(body.browser_binding or {})
+        result = open_publication_entry_url(body.url, browser_binding=binding)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"打开发布页失败：{exc}") from exc
+    return {
+        **result,
+        "platform": normalize_publication_platform(body.platform) or str(body.platform or "").strip(),
+        "account_label": str(body.account_label or "").strip(),
+        "credential_ref": str(body.credential_ref or "").strip(),
+        "browser_profile_id": str(body.browser_profile_id or binding.get("profile_id") or "").strip(),
+    }
 
 
 def _normalize_publication_browser(value: str) -> str:

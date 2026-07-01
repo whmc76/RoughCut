@@ -194,7 +194,12 @@ from roughcut.pipeline.job_rerun import (
     execute_job_rerun_plan,
     resolve_job_rerun_request,
 )
-from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
+from roughcut.pipeline.orchestrator import (
+    ALL_PIPELINE_STEPS,
+    PIPELINE_STEPS,
+    SMART_DIRECTOR_WORKFLOW_MODE,
+    create_job_steps,
+)
 from roughcut.media.manual_editor_assets import (
     ensure_manual_editor_preview_assets,
     load_manual_editor_preview_assets,
@@ -250,6 +255,7 @@ from roughcut.speech.subtitle_pipeline import subtitle_projection_data_is_curren
 from roughcut.speech.subtitle_segmentation import SubtitleEntry, analyze_subtitle_segmentation, segment_subtitles
 from roughcut.publication import (
     active_publication_credentials,
+    backfill_manual_publication_attempt,
     build_publication_plan,
     check_publication_browser_agent_ready,
     list_publication_attempts,
@@ -377,9 +383,18 @@ STEP_LABELS = {
     "chapter_analysis": "进度条章节",
     "render": "渲染输出",
     "script_footage_remix": "解说二创",
+    "director_brief": "导演简报",
+    "script_plan": "脚本规划",
+    "storyboard_plan": "分镜规划",
+    "asset_plan": "素材规划",
+    "asset_generation": "素材生成",
+    "voiceover_plan": "配音规划",
+    "music_plan": "音乐规划",
+    "compose_plan": "合成规划",
+    "director_review": "导演复核",
 }
 
-STEP_ORDER = {step_name: index for index, step_name in enumerate(PIPELINE_STEPS)}
+STEP_ORDER = {step_name: index for index, step_name in enumerate(ALL_PIPELINE_STEPS)}
 MANUAL_EDITOR_OPTIONAL_PREREQUISITE_STEPS = {"dialogue_polish", "avatar_commentary"}
 _LIST_PREVIEW_ARTIFACT_TYPES = (
     "content_profile_final",
@@ -527,6 +542,15 @@ class PublicationSubmitIn(BaseModel):
     creator_profile_id: str | None = None
     platforms: list[str] = Field(default_factory=list)
     platform_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    force_regenerate: bool = False
+
+
+class JobManualPublicationResultIn(BaseModel):
+    creator_profile_id: str | None = None
+    platform: str
+    public_url: str | None = None
+    receipt_id: str | None = None
+    post_id: str | None = None
 
 
 class ManualEditorSegmentOut(BaseModel):
@@ -2657,8 +2681,6 @@ async def create_job(
 ):
     settings = get_settings()
     uploaded_files = _normalize_uploaded_sources(file=file, files=files)
-    if not uploaded_files:
-        raise HTTPException(status_code=422, detail="At least one file is required")
 
     try:
         language = normalize_job_language(language)
@@ -2715,6 +2737,11 @@ async def create_job(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    smart_director_prompt_only = workflow_mode == SMART_DIRECTOR_WORKFLOW_MODE and not uploaded_files
+    if not uploaded_files and workflow_mode != SMART_DIRECTOR_WORKFLOW_MODE:
+        raise HTTPException(status_code=422, detail="At least one file is required")
+    if smart_director_prompt_only and not (task_brief or video_description):
+        raise HTTPException(status_code=422, detail="Smart Director requires task_brief or video_description")
     resolved_creator_card: CreatorCard | None = None
     if parsed_creator_card_id is not None:
         resolved_creator_card = await session.get(CreatorCard, parsed_creator_card_id)
@@ -2728,17 +2755,24 @@ async def create_job(
 
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_root = Path(tmpdir)
-        local_source_files = [
-            await _save_uploaded_file(upload, target_dir=temp_root, index=index, settings=settings)
-            for index, upload in enumerate(uploaded_files)
-        ]
-
-        if len(local_source_files) == 1:
-            source_path = local_source_files[0]
-            source_name = Path(uploaded_files[0].filename or source_path.name).name
+        local_source_files: list[Path] = []
+        source_path: Path | None = None
+        source_ref: str
+        if smart_director_prompt_only:
+            source_name = _build_smart_director_prompt_source_name(task_brief or video_description or "")
+            source_ref = f"prompt://smart-director/{uuid.uuid4()}"
         else:
-            source_name = _build_merged_source_name(uploaded_files)
-            source_path = await _merge_upload_files_for_job(local_source_files, output_path=temp_root / source_name)
+            local_source_files = [
+                await _save_uploaded_file(upload, target_dir=temp_root, index=index, settings=settings)
+                for index, upload in enumerate(uploaded_files)
+            ]
+
+            if len(local_source_files) == 1:
+                source_path = local_source_files[0]
+                source_name = Path(uploaded_files[0].filename or source_path.name).name
+            else:
+                source_name = _build_merged_source_name(uploaded_files)
+                source_path = await _merge_upload_files_for_job(local_source_files, output_path=temp_root / source_name)
 
         source_context = _build_job_source_context(
             uploaded_files=uploaded_files,
@@ -2764,16 +2798,23 @@ async def create_job(
                 else None
             ),
         )
+        if smart_director_prompt_only:
+            source_context = {
+                **(source_context or {}),
+                "source_kind": "prompt_only",
+                "workflow_mode": SMART_DIRECTOR_WORKFLOW_MODE,
+            }
 
         job_id = uuid.uuid4()
-        storage = get_storage()
-        storage.ensure_bucket()
-        s3_key = job_key(str(job_id), source_name)
-        storage.upload_file(source_path, s3_key)
+        if source_path is not None:
+            storage = get_storage()
+            storage.ensure_bucket()
+            source_ref = job_key(str(job_id), source_name)
+            storage.upload_file(source_path, source_ref)
 
         job = Job(
             id=job_id,
-            source_path=s3_key,
+            source_path=source_ref,
             source_name=source_name,
             status="awaiting_init" if normalized_start_mode == "manual" else "pending",
             language=language,
@@ -2791,11 +2832,11 @@ async def create_job(
             job.creator_card = resolved_creator_card
         session.add(job)
 
-        steps = create_job_steps(job_id)
+        steps = create_job_steps(job_id, workflow_mode=workflow_mode)
         step_initial_status = "awaiting_init" if normalized_start_mode == "manual" else "pending"
         for step in steps:
             step.status = step_initial_status
-            if step.step_name == "content_profile" and source_context:
+            if step.step_name in {"content_profile", "director_brief"} and source_context:
                 step.metadata_ = {
                     **(step.metadata_ or {}),
                     "source_context": source_context,
@@ -2821,6 +2862,13 @@ def _normalize_video_description(value: str | None) -> str | None:
     if not normalized:
         return None
     return normalized[:4000]
+
+
+def _build_smart_director_prompt_source_name(prompt: str) -> str:
+    normalized = re.sub(r"\s+", "_", str(prompt or "").strip())
+    safe = re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+", "_", normalized).strip("._-")
+    digest = hashlib.sha256(str(prompt or "").encode("utf-8", errors="ignore")).hexdigest()[:10]
+    return f"smart_director_{(safe or 'prompt')[:48]}_{digest}.prompt"
 
 
 def _normalize_form_bool(value: str | None) -> bool:
@@ -10440,12 +10488,12 @@ async def confirm_content_profile(
 @router.get("/{job_id}/download")
 async def get_download_url(
     job_id: uuid.UUID,
-    variant: str = "packaged",
+    variant: str = "auto",
     session: AsyncSession = Depends(get_session),
 ):
-    variant_value = str(variant or "packaged").strip().lower()
-    if variant_value not in {"packaged", "plain"}:
-        raise HTTPException(status_code=400, detail="variant must be 'packaged' or 'plain'")
+    variant_value = str(variant or "auto").strip().lower()
+    if variant_value not in {"auto", "enhanced", "packaged", "plain"}:
+        raise HTTPException(status_code=400, detail="variant must be 'auto', 'enhanced', 'packaged', or 'plain'")
     render_output, artifact_payload = await _load_download_context(job_id, session)
     download_path = _resolve_download_variant_path(render_output, artifact_payload, variant_value)
     _download_file_cache_set(job_id, variant_value, download_path)
@@ -10517,12 +10565,12 @@ async def download_selected_files_zip(
 @router.get("/{job_id}/download/file")
 async def download_rendered_file(
     job_id: uuid.UUID,
-    variant: str = "packaged",
+    variant: str = "auto",
     disposition: str = "attachment",
 ):
-    variant_value = str(variant or "packaged").strip().lower()
-    if variant_value not in {"packaged", "plain"}:
-        raise HTTPException(status_code=400, detail="variant must be 'packaged' or 'plain'")
+    variant_value = str(variant or "auto").strip().lower()
+    if variant_value not in {"auto", "enhanced", "packaged", "plain"}:
+        raise HTTPException(status_code=400, detail="variant must be 'auto', 'enhanced', 'packaged', or 'plain'")
     disposition_value = str(disposition or "attachment").strip().lower()
     if disposition_value not in {"attachment", "inline"}:
         raise HTTPException(status_code=400, detail="disposition must be 'attachment' or 'inline'")
@@ -10578,7 +10626,8 @@ async def get_job_publication_plan(
         requested_platform_options=None,
         resolve_dynamic_options=dynamic_options,
     )
-    return build_publication_plan(
+    profile_payload = await _job_agent_publication_profile_payload(session, job)
+    plan = build_publication_plan(
         job=job,
         render_output=render_output,
         platform_packaging=packaging,
@@ -10587,6 +10636,57 @@ async def get_job_publication_plan(
         platform_options=platform_options,
         existing_attempts=existing_attempts,
     )
+    return _attach_job_publication_selection_context(
+        plan,
+        publication_profile_payload=profile_payload,
+        platform_options=platform_options,
+    )
+
+
+@router.post("/{job_id}/publication/manual-result")
+async def backfill_job_manual_publication_result(
+    job_id: uuid.UUID,
+    payload: JobManualPublicationResultIn,
+    session: AsyncSession = Depends(get_session),
+):
+    platform = normalize_publication_platform(payload.platform)
+    public_url = str(payload.public_url or "").strip()
+    receipt_id = str(payload.receipt_id or "").strip()
+    post_id = str(payload.post_id or "").strip()
+    if not platform:
+        raise HTTPException(status_code=400, detail="缺少发布平台。")
+    if not public_url and not receipt_id:
+        raise HTTPException(status_code=400, detail="请至少填写公开视频链接或回执 ID。")
+
+    job, render_output, packaging, creator_profile = await _load_publication_inputs(
+        job_id=job_id,
+        creator_profile_id=payload.creator_profile_id,
+        session=session,
+    )
+    existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
+    plan = build_publication_plan(
+        job=job,
+        render_output=render_output,
+        platform_packaging=packaging,
+        creator_profile=creator_profile,
+        requested_platforms=[platform],
+        platform_options={},
+        existing_attempts=existing_attempts,
+    )
+    try:
+        attempt = await backfill_manual_publication_attempt(
+            session,
+            plan=plan,
+            platform=platform,
+            public_url=public_url,
+            receipt_id=receipt_id,
+            post_id=post_id,
+            creator_profile_id=payload.creator_profile_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await session.commit()
+    return attempt
 
 
 @router.post("/{job_id}/publication/material-tasks", response_model=IntelligentCopyGenerateTaskOut)
@@ -10615,6 +10715,7 @@ async def create_job_publication_material_task(
         IntelligentCopyGenerateIn(
             folder_path=folder_path,
             platforms=payload.platforms,
+            platform_options=payload.platform_options,
             use_existing_cover=False,
             creator_profile_id=resolved_creator_profile_id,
             force_regenerate=True,
@@ -10635,13 +10736,15 @@ async def prepare_job_publication_materials(
     )
     existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
     material_generation: dict[str, Any] | None = None
-    if _job_publication_packaging_needs_generation(packaging, requested_platforms=payload.platforms):
+    force_regenerate = bool(getattr(payload, "force_regenerate", False))
+    if force_regenerate or _job_publication_packaging_needs_generation(packaging, requested_platforms=payload.platforms):
         material_generation = await _generate_job_publication_materials(
             job=job,
             render_output=render_output,
             creator_profile=creator_profile,
             creator_profile_id=payload.creator_profile_id,
             platforms=payload.platforms,
+            force_regenerate=force_regenerate,
         )
         job, render_output, packaging, creator_profile = await _load_publication_inputs(
             job_id=job_id,
@@ -10659,6 +10762,7 @@ async def prepare_job_publication_materials(
         requested_platforms=payload.platforms,
         requested_platform_options=payload.platform_options,
     )
+    profile_payload = await _job_agent_publication_profile_payload(session, job)
     plan = build_publication_plan(
         job=job,
         render_output=render_output,
@@ -10667,6 +10771,11 @@ async def prepare_job_publication_materials(
         requested_platforms=payload.platforms,
         platform_options=platform_options,
         existing_attempts=existing_attempts,
+    )
+    plan = _attach_job_publication_selection_context(
+        plan,
+        publication_profile_payload=profile_payload,
+        platform_options=platform_options,
     )
     plan, job, render_output, packaging, creator_profile = await _maybe_auto_heal_job_publication_cover_plan(
         plan=plan,
@@ -10679,6 +10788,11 @@ async def prepare_job_publication_materials(
         platform_options=platform_options,
         existing_attempts=existing_attempts,
         session=session,
+    )
+    plan = _attach_job_publication_selection_context(
+        plan,
+        publication_profile_payload=profile_payload,
+        platform_options=platform_options,
     )
     if material_generation is not None:
         plan = {**plan, "material_generation": material_generation}
@@ -10854,6 +10968,62 @@ def _merge_publish_platform_options(
                 current[key] = value
         merged[platform] = current
     return merged
+
+
+def _normalize_publication_platform_list(value: Any) -> list[str]:
+    normalized: list[str] = []
+    for item in list(value or []):
+        platform = normalize_publication_platform(item)
+        if platform and platform not in normalized:
+            normalized.append(platform)
+    return normalized
+
+
+async def _job_agent_publication_profile_payload(session: AsyncSession, job: Job) -> dict[str, Any]:
+    if not hasattr(session, "execute"):
+        return {}
+    result = await session.execute(select(JobAgentPlan).where(JobAgentPlan.job_id == job.id))
+    plan = result.scalar_one_or_none()
+    profile: CreatorPublicationProfile | None = None
+    if plan is not None and plan.publication_profile_id is not None:
+        profile = await session.get(CreatorPublicationProfile, plan.publication_profile_id)
+    if profile is None and job.creator_card_id:
+        profile_result = await session.execute(
+            select(CreatorPublicationProfile)
+            .where(CreatorPublicationProfile.creator_card_id == job.creator_card_id)
+            .order_by(CreatorPublicationProfile.updated_at.desc())
+            .limit(1)
+        )
+        profile = profile_result.scalar_one_or_none()
+    payload = dict(profile.publication_payload_json or {}) if profile is not None and isinstance(profile.publication_payload_json, dict) else {}
+    if job.creator_card_id:
+        creator = await session.get(CreatorCard, job.creator_card_id)
+        creator_default_platforms = _normalize_publication_platform_list(getattr(creator, "default_platforms", []) if creator is not None else [])
+        if creator_default_platforms:
+            payload["default_platforms"] = creator_default_platforms
+    return payload
+
+
+def _attach_job_publication_selection_context(
+    plan: dict[str, Any],
+    *,
+    publication_profile_payload: dict[str, Any] | None,
+    platform_options: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+    payload = publication_profile_payload if isinstance(publication_profile_payload, dict) else {}
+    normalized_options = _normalize_publish_platform_options_payload(platform_options)
+    default_platforms = _normalize_publication_platform_list(payload.get("default_platforms"))
+    option_platforms = _normalize_publication_platform_list(normalized_options.keys())
+    updated = dict(plan)
+    updated["platform_options"] = normalized_options
+    updated["creator_default_platforms"] = default_platforms
+    updated["creator_platform_option_platforms"] = option_platforms
+    updated["platform_selection_policy"] = {
+        "source": "creator_publication_profile" if (default_platforms or option_platforms) else "all_platforms",
+        "default_platforms": default_platforms,
+        "option_platforms": option_platforms,
+    }
+    return updated
 
 
 def _job_collection_strategy_match_text(job: Job) -> str:
@@ -11250,6 +11420,7 @@ async def _generate_job_publication_materials(
     creator_profile: dict[str, Any] | None,
     creator_profile_id: str | None,
     platforms: list[str] | None,
+    force_regenerate: bool = False,
 ) -> dict[str, Any]:
     folder_path = _derive_job_publication_folder_path(job, render_output)
     if not folder_path:
@@ -11261,6 +11432,7 @@ async def _generate_job_publication_materials(
             creator_profile_id=creator_profile_id,
             creator_profile=creator_profile,
             creator_profile_name=str((creator_profile or {}).get("display_name") or "").strip() or None,
+            force_regenerate=force_regenerate,
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"自动生成发布物料失败：{exc}") from exc
@@ -11524,6 +11696,9 @@ def _preferred_job_publication_media_path(
     enhanced_path = _first_existing_runtime_path(payload.get("enhanced_mp4"), file_only=True)
     if enhanced_path is not None:
         return str(enhanced_path)
+    packaged_path = _first_existing_runtime_path(payload.get("packaged_mp4"), file_only=True)
+    if packaged_path is not None:
+        return str(packaged_path)
     avatar_result = payload.get("avatar_result") if isinstance(payload.get("avatar_result"), dict) else {}
     avatar_ready = str(avatar_result.get("status") or "").strip().lower() == "done"
     if "avatar_commentary" in enhancement_modes and avatar_ready:
@@ -11533,8 +11708,7 @@ def _preferred_job_publication_media_path(
     legacy_ai_effect_path = _first_existing_runtime_path(payload.get("ai_effect_mp4"), file_only=True)
     if legacy_ai_effect_path is not None:
         return str(legacy_ai_effect_path)
-    packaged_path = _first_existing_runtime_path(payload.get("packaged_mp4"), file_only=True)
-    return str(packaged_path) if packaged_path is not None else ""
+    return ""
 
 
 def _load_job_smart_copy_publication_packaging(
@@ -12011,10 +12185,10 @@ async def _load_latest_done_render_output(job_id: uuid.UUID, session: AsyncSessi
 
 
 _DOWNLOADABLE_RENDER_KEYS: tuple[tuple[str, str, str, bool], ...] = (
-    ("packaged_mp4", "成片（包装版）", "video", True),
-    ("enhanced_mp4", "成片（增强版）", "video", True),
-    ("packaged_srt", "字幕（包装版）", "subtitle", True),
-    ("enhanced_srt", "字幕（增强版）", "subtitle", True),
+    ("enhanced_mp4", "成片（最终增强版）", "video", True),
+    ("packaged_mp4", "成片（标准剪辑版）", "video", True),
+    ("enhanced_srt", "字幕（最终增强版）", "subtitle", True),
+    ("packaged_srt", "字幕（标准剪辑版）", "subtitle", True),
     ("cover", "封面", "image", True),
 )
 
@@ -12050,15 +12224,15 @@ def _collect_downloadable_files(render_output: RenderOutput | None, payload: dic
     for key, label, kind, recommended in _DOWNLOADABLE_RENDER_KEYS:
         add_file(key, label, kind, payload.get(key), recommended=recommended)
     if not any(item["id"] == "enhanced_mp4" for item in files):
-        add_file("enhanced_mp4", "成片（增强版）", "video", payload.get("avatar_mp4") or payload.get("ai_effect_mp4"))
+        add_file("enhanced_mp4", "成片（最终增强版）", "video", payload.get("avatar_mp4") or payload.get("ai_effect_mp4"))
     if not any(item["id"] == "enhanced_srt" for item in files):
-        add_file("enhanced_srt", "字幕（增强版）", "subtitle", payload.get("avatar_srt") or payload.get("ai_effect_srt"))
+        add_file("enhanced_srt", "字幕（最终增强版）", "subtitle", payload.get("avatar_srt") or payload.get("ai_effect_srt"))
 
     for index, value in enumerate(payload.get("cover_variants") or []):
         add_file(f"cover_variants:{index}", f"封面备选 {index + 1}", "image", value, recommended=False)
 
     if render_output is not None and not any(item["id"] == "packaged_mp4" for item in files):
-        add_file("packaged_mp4", "成片（包装版）", "video", render_output.output_path, recommended=True)
+        add_file("packaged_mp4", "成片（标准剪辑版）", "video", render_output.output_path, recommended=True)
 
     files.sort(key=lambda item: _download_file_sort_key(str(item["id"])))
     return files
@@ -12066,10 +12240,10 @@ def _collect_downloadable_files(render_output: RenderOutput | None, payload: dic
 
 def _download_file_sort_key(file_id: str) -> tuple[int, str]:
     priority = {
-        "packaged_mp4": 0,
-        "enhanced_mp4": 1,
-        "packaged_srt": 2,
-        "enhanced_srt": 3,
+        "enhanced_mp4": 0,
+        "packaged_mp4": 1,
+        "enhanced_srt": 2,
+        "packaged_srt": 3,
         "cover": 4,
     }
     if file_id.startswith("cover_variants:"):
@@ -12097,6 +12271,17 @@ def _unique_zip_member_name(filename: str, used_names: set[str]) -> str:
 
 def _resolve_download_variant_path(render_output: RenderOutput | None, payload: dict[str, Any] | None, variant: str) -> Path:
     payload = payload if isinstance(payload, dict) else {}
+    if variant == "auto":
+        path = _first_existing_download_path(
+            payload.get("enhanced_mp4"),
+            payload.get("packaged_mp4"),
+            render_output.output_path if render_output else None,
+            payload.get("avatar_mp4"),
+            payload.get("ai_effect_mp4"),
+        )
+        if path is not None:
+            return path
+        raise HTTPException(status_code=404, detail="Rendered output file not found")
     if variant == "packaged":
         path = _first_existing_download_path(payload.get("packaged_mp4"), render_output.output_path if render_output else None)
         if path is not None:

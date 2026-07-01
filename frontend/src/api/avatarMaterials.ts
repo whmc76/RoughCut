@@ -1,4 +1,10 @@
-import type { AvatarCreatorProfile, AvatarMaterialLibrary, AvatarPublicationProfileList } from "../types";
+import type {
+  AvatarCreatorProfile,
+  AvatarMaterialLibrary,
+  AvatarPublicationProfileList,
+  PublicationEntryOpenRequest,
+  PublicationEntryOpenResponse,
+} from "../types";
 import { apiPath, request, requestForm } from "./core";
 
 export const avatarMaterialsApi = {
@@ -8,6 +14,11 @@ export const avatarMaterialsApi = {
     request<AvatarPublicationProfileList>(`/avatar-materials/publication-profiles/${encodeURIComponent(profileId)}/match-browser-login`, {
       method: "POST",
       body: JSON.stringify({ browser, platforms }),
+    }),
+  openPublicationEntry: (body: PublicationEntryOpenRequest) =>
+    request<PublicationEntryOpenResponse>("/avatar-materials/publication/open-entry", {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
   uploadAvatarMaterialProfile: (
     displayName: string,

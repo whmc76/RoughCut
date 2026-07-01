@@ -30,6 +30,7 @@ from roughcut.api.schemas import (
     IntelligentCopyInspectOut,
     IntelligentCopyImagegenCompleteIn,
     IntelligentCopyImagegenRequestListOut,
+    IntelligentManualPublicationResultIn,
     IntelligentCopyPathSuggestIn,
     IntelligentCopyPathSuggestOut,
     IntelligentCopyPathSuggestionOut,
@@ -57,6 +58,7 @@ from roughcut.media.probe import publication_upload_compatibility
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.publication import (
     active_publication_credentials,
+    backfill_manual_publication_attempt,
     build_publication_plan,
     check_publication_browser_agent_ready,
     list_publication_attempts,
@@ -294,6 +296,7 @@ async def generate_folder_materials(body: IntelligentCopyGenerateIn):
             body.folder_path,
             copy_style=body.copy_style,
             platforms=body.platforms,
+            platform_options=body.platform_options,
             use_existing_cover=body.use_existing_cover,
             force_regenerate=body.force_regenerate,
             creator_profile_id=str(body.creator_profile_id or "").strip() or None,
@@ -332,10 +335,12 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
 
     folder_path = str(inspection["folder_path"])
     requested_platforms = _normalize_generation_platforms(body.platforms)
+    requested_platform_options = _normalize_publish_platform_options_payload(body.platform_options)
     active_task = _find_active_generation_task(
         folder_path=folder_path,
         copy_style=body.copy_style,
         platforms=requested_platforms,
+        platform_options=requested_platform_options,
         use_existing_cover=body.use_existing_cover,
         force_regenerate=body.force_regenerate,
         creator_profile_id=str(body.creator_profile_id or "").strip() or None,
@@ -352,6 +357,7 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
         "use_existing_cover": bool(body.use_existing_cover),
         "force_regenerate": bool(body.force_regenerate),
         "platforms": requested_platforms,
+        "platform_options": requested_platform_options,
         "creator_profile_id": str(body.creator_profile_id or "").strip() or None,
         "creator_profile_name": str((creator_profile or {}).get("display_name") or "").strip() or None,
         "status": "queued",
@@ -378,6 +384,7 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
         folder_path=folder_path,
         copy_style=body.copy_style,
         platforms=requested_platforms,
+        platform_options=requested_platform_options,
         use_existing_cover=body.use_existing_cover,
         force_regenerate=body.force_regenerate,
         creator_profile_id=str(body.creator_profile_id or "").strip() or None,
@@ -475,6 +482,55 @@ async def reconcile_publication_task_payload(
     result = await reconcile_publication_attempt_from_browser_agent_payload(session, payload)
     await session.commit()
     return result
+
+
+@router.post("/publication/manual-result")
+async def backfill_manual_publication_result(
+    body: IntelligentManualPublicationResultIn,
+    session: AsyncSession = Depends(get_session),
+):
+    platform = str(body.platform or "").strip().lower().replace("_", "-")
+    public_url = str(body.public_url or "").strip()
+    receipt_id = str(body.receipt_id or "").strip()
+    post_id = str(body.post_id or "").strip()
+    if not platform:
+        raise HTTPException(status_code=400, detail="缺少发布平台。")
+    if not public_url and not receipt_id:
+        raise HTTPException(status_code=400, detail="请至少填写公开视频链接或回执 ID。")
+    try:
+        plan_inputs = await _load_intelligent_publish_inputs(
+            folder_path=body.folder_path,
+            creator_profile_id=body.creator_profile_id,
+            session=session,
+            materialize_job=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    existing_attempts = await _list_existing_intelligent_publish_attempts(session, plan_inputs["job"])
+    plan = build_publication_plan(
+        job=plan_inputs["job"],
+        render_output=plan_inputs["render_output"],
+        source_media_path=plan_inputs.get("source_video_path"),
+        platform_packaging=plan_inputs["packaging"],
+        creator_profile=plan_inputs["creator_profile"],
+        requested_platforms=[platform],
+        platform_options={},
+        existing_attempts=existing_attempts,
+    )
+    try:
+        attempt = await backfill_manual_publication_attempt(
+            session,
+            plan=plan,
+            platform=platform,
+            public_url=public_url,
+            receipt_id=receipt_id,
+            post_id=post_id,
+            creator_profile_id=body.creator_profile_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await session.commit()
+    return attempt
 
 
 @router.post("/publication/plan")
@@ -1033,11 +1089,13 @@ def _find_active_generation_task(
     copy_style: str | None,
     platforms: list[str] | None,
     use_existing_cover: bool,
+    platform_options: dict[str, Any] | None = None,
     force_regenerate: bool = False,
     creator_profile_id: str | None = None,
 ) -> dict[str, Any] | None:
     normalized_style = str(copy_style or "").strip()
     normalized_platforms = _normalize_generation_platforms(platforms)
+    normalized_platform_options = _normalize_publish_platform_options_payload(platform_options)
     normalized_creator_profile_id = str(creator_profile_id or "").strip()
     for item in _load_generation_tasks():
         if item.get("folder_path") != folder_path:
@@ -1045,6 +1103,8 @@ def _find_active_generation_task(
         if str(item.get("copy_style") or "").strip() != normalized_style:
             continue
         if _normalize_generation_platforms(item.get("platforms") or []) != normalized_platforms:
+            continue
+        if _normalize_publish_platform_options_payload(item.get("platform_options")) != normalized_platform_options:
             continue
         if bool(item.get("use_existing_cover")) != bool(use_existing_cover):
             continue
@@ -1179,6 +1239,7 @@ def _schedule_generation_task(
     folder_path: str,
     copy_style: str | None,
     platforms: list[str] | None,
+    platform_options: dict[str, Any] | None,
     use_existing_cover: bool,
     force_regenerate: bool,
     creator_profile_id: str | None,
@@ -1201,6 +1262,14 @@ def _schedule_generation_task(
         command.extend(["--copy-style", str(copy_style)])
     for platform in platforms or []:
         command.extend(["--platform", str(platform)])
+    normalized_platform_options = _normalize_publish_platform_options_payload(platform_options)
+    if normalized_platform_options:
+        command.extend(
+            [
+                "--platform-options-json",
+                json.dumps(normalized_platform_options, ensure_ascii=False, separators=(",", ":")),
+            ]
+        )
     if creator_profile_id:
         command.extend(["--creator-profile-id", str(creator_profile_id)])
     if creator_profile_name:
@@ -1235,6 +1304,7 @@ def _run_generation_task_thread(
     folder_path: str,
     copy_style: str | None,
     platforms: list[str] | None,
+    platform_options: dict[str, Any] | None,
     use_existing_cover: bool,
     force_regenerate: bool,
     creator_profile_id: str | None,
@@ -1246,6 +1316,7 @@ def _run_generation_task_thread(
             folder_path=folder_path,
             copy_style=copy_style,
             platforms=platforms,
+            platform_options=platform_options,
             use_existing_cover=use_existing_cover,
             force_regenerate=force_regenerate,
             creator_profile_id=creator_profile_id,
@@ -1260,6 +1331,7 @@ async def _run_generation_task(
     folder_path: str,
     copy_style: str | None,
     platforms: list[str] | None,
+    platform_options: dict[str, Any] | None,
     use_existing_cover: bool,
     force_regenerate: bool,
     creator_profile_id: str | None,
@@ -1299,6 +1371,7 @@ async def _run_generation_task(
             folder_path,
             copy_style=copy_style,
             platforms=platforms,
+            platform_options=platform_options,
             use_existing_cover=use_existing_cover,
             force_regenerate=force_regenerate,
             creator_profile_id=creator_profile_id,

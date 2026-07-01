@@ -688,7 +688,7 @@ def _format_expectation(*, skip_backend_smoke: bool, status_expectation: str, ba
 async def main() -> int:
     settings = get_settings()
 
-    parser = argparse.ArgumentParser(description="Run reusable release gate for publication readiness.")
+    parser = argparse.ArgumentParser(description="Run reusable gate checks for platform publication.")
     parser.add_argument("--platform", action="append", default=[], help="Target platform for publication check.")
     parser.add_argument(
         "--target-profile-id",
@@ -699,7 +699,7 @@ async def main() -> int:
     parser.add_argument(
         "--allow-anonymous-profile",
         action="store_true",
-        help="允许未指定 --target-profile-id 执行发布准备检查（默认禁止）。",
+        help="允许未指定 --target-profile-id 执行平台发布检查（默认禁止）。",
     )
     parser.add_argument("--publication-adapter", default="browser_agent", help="publication adapter name for backend smoke profile.")
     parser.add_argument("--execution-mode", default="browser_agent", help="execution mode for fake contract attempts.")

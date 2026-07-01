@@ -69,8 +69,9 @@ export function VisualPlansPage() {
   return (
     <section className="page-stack asset-workspace-page">
       <PageHeader
-        eyebrow="创作资产"
-        title="智能视觉方案"
+        eyebrow="资产库"
+        title="视觉方案"
+        description="管理包装、字幕、封面方向、画面增强和平台适配约束。"
       />
       <section className="page-section asset-workspace-section asset-workspace-section-plain">
         <div className="page-section-body">

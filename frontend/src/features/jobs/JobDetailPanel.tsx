@@ -554,13 +554,13 @@ export function JobDetailPanel({
                 <div className="muted compact-top">{agentPlanPayload.task_strategy?.summary || "未生成任务策略摘要。"}</div>
               </div>
               <div className="detail-compact-card">
-                <strong>智能视觉方案</strong>
+                <strong>视觉方案</strong>
                 <div className="muted compact-top">{agentPlanPayload.visual_plan?.summary || "未生成视觉方案摘要。"}</div>
               </div>
               <div className="detail-compact-card">
-                <strong>智能发布管理</strong>
+                <strong>平台发布档案</strong>
                 <div className="muted compact-top">
-                  {agentPlanPayload.publication_plan?.summary || "未生成发布管理摘要。"}
+                  {agentPlanPayload.publication_plan?.summary || "未生成发布档案摘要。"}
                 </div>
               </div>
             </div>

@@ -229,6 +229,7 @@ from roughcut.pipeline.steps import (
     _shift_render_subtitle_items,
     _bound_render_subtitles_to_duration,
     _bound_render_subtitles_to_packaged_content_window,
+    _render_alignment_uses_rendered_audio_timing,
     _stabilize_render_subtitle_timeline,
     _subtitle_item_payload,
     _subtitle_projection_entry_payload,
@@ -2075,6 +2076,26 @@ def test_bound_render_subtitles_to_packaged_content_window_excludes_outro_tail()
     assert [item["text_final"] for item in bounded] == ["正片字幕", "那我们下期再见"]
     assert bounded[-1]["end_time"] == pytest.approx(443.08)
     assert bounded[-1]["render_duration_bound_repair"] == "clamp_to_packaged_content_window"
+
+
+def test_rendered_audio_repaired_packaged_tail_skips_static_outro_clamp() -> None:
+    alignment = {
+        "status": "repaired",
+        "repaired": True,
+        "repair_mode": "rendered_audio_forced_alignment",
+        "after": {"gate_pass": True},
+    }
+    subtitles = [
+        {"start_time": 441.76, "end_time": 450.645, "text_final": "那我们下期再见"},
+    ]
+
+    if _render_alignment_uses_rendered_audio_timing(alignment):
+        bounded = _bound_render_subtitles_to_duration(subtitles, duration_sec=451.285)
+    else:
+        bounded = _bound_render_subtitles_to_packaged_content_window(subtitles, content_end_sec=443.205)
+
+    assert bounded[-1]["end_time"] == pytest.approx(450.645)
+    assert "render_duration_bound_repair" not in bounded[-1]
 
 
 def test_render_subtitle_alignment_gate_blocks_large_bad_drift_ratio() -> None:

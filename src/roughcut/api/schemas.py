@@ -732,6 +732,7 @@ class IntelligentCopyGenerateIn(BaseModel):
     folder_path: str
     copy_style: str | None = None
     platforms: list[str] = Field(default_factory=list)
+    platform_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
     use_existing_cover: bool = False
     creator_profile_id: str | None = None
     force_regenerate: bool = False
@@ -752,6 +753,15 @@ class IntelligentPublishIn(BaseModel):
     creator_profile_id: str | None = None
     platforms: list[str] = Field(default_factory=list)
     platform_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class IntelligentManualPublicationResultIn(BaseModel):
+    folder_path: str
+    creator_profile_id: str | None = None
+    platform: str
+    public_url: str | None = None
+    receipt_id: str | None = None
+    post_id: str | None = None
 
 
 class IntelligentPublishSchemeIn(IntelligentPublishIn):
@@ -795,6 +805,12 @@ class IntelligentCopyManualHandoffTargetOut(BaseModel):
     label: str = ""
     status: str | None = None
     login_url: str | None = None
+    manual_publish_entry_url: str | None = None
+    account_label: str | None = None
+    credential_ref: str | None = None
+    browser_profile_id: str | None = None
+    browser_binding: dict[str, Any] = Field(default_factory=dict)
+    reason: str | None = None
 
 
 class IntelligentCopyPlatformMaterialOut(BaseModel):
@@ -903,7 +919,12 @@ class IntelligentCopyGenerateTaskOut(BaseModel):
     id: str
     folder_path: str
     copy_style: str | None = None
+    platforms: list[str] = Field(default_factory=list)
+    platform_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
     use_existing_cover: bool = False
+    force_regenerate: bool = False
+    creator_profile_id: str | None = None
+    creator_profile_name: str | None = None
     status: str
     progress: int = 0
     stage: str = "queued"

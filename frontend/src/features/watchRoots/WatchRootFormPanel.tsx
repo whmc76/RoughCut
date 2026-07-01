@@ -76,7 +76,7 @@ export function WatchRootFormPanel({
     <section className="panel">
       <PanelHeader
         title={isEditing ? t("watch.form.editTitle") : t("watch.form.createTitle")}
-        description={t("watch.form.description")}
+        description="设置监听目录、任务类型、创作者配置绑定和进入剪辑队列后的启动方式。"
         actions={isEditing ? <span className={`status-pill ${autosaveTone}`}>{autosaveLabel}</span> : undefined}
       />
       <form
@@ -86,51 +86,35 @@ export function WatchRootFormPanel({
           onSubmit();
         }}
       >
-        <TextField label={t("watch.form.path")} value={form.path} onChange={(event) => onChange({ ...form, path: event.target.value })} />
-        <SelectField
-          label={t("watch.form.configProfile")}
-          value={form.config_profile_id}
-          onChange={(event) => onChange({ ...form, config_profile_id: event.target.value })}
-          options={configProfileOptions}
-        />
-        <div className="notice">
-          <div className="stat-label">
-            {form.config_profile_id ? t("watch.form.configProfileBoundTitle") : t("watch.form.configProfileFallbackTitle")}
+        <div className="auto-task-form-section">
+          <div className="auto-task-form-section-head">
+            <strong>监听目录</strong>
+            <span>检测这个目录里的新增素材。</span>
           </div>
-          <div className="muted compact-top">
-            {form.config_profile_id
-              ? t("watch.form.configProfileBoundDescription")
-              : t("watch.form.configProfileFallbackDescription")}
+          <TextField label={t("watch.form.path")} value={form.path} onChange={(event) => onChange({ ...form, path: event.target.value })} />
+          <div className="field-row compact-top">
+            <CheckboxField
+              label={t("watch.form.recursive")}
+              checked={form.recursive}
+              onChange={(event) => onChange({ ...form, recursive: event.target.checked })}
+            />
+            <SelectField
+              label={t("watch.form.scanMode")}
+              value={form.scan_mode}
+              onChange={(event) => onChange({ ...form, scan_mode: event.target.value as RootForm["scan_mode"] })}
+              options={[
+                { value: "fast", label: t("watch.form.fast") },
+                { value: "precise", label: t("watch.form.precise") },
+              ]}
+            />
           </div>
-          {effectiveConfigProfile ? (
-            <>
-              <div className="compact-top">
-                <strong>{effectiveConfigProfile.name}</strong>
-                {boundConfigProfile ? null : <span className="status-pill done" style={{ marginLeft: 8 }}>{t("watch.form.followingActiveProfile")}</span>}
-                {effectiveConfigProfile.is_active ? <span className="status-pill done" style={{ marginLeft: 8 }}>{t("watch.form.currentActiveProfile")}</span> : null}
-              </div>
-              {effectiveConfigProfile.description ? <div className="muted compact-top">{effectiveConfigProfile.description}</div> : null}
-              <div className="muted compact-top">{t("watch.form.profileUpdatedAt")}: {new Date(effectiveConfigProfile.updated_at).toLocaleString()}</div>
-              <div className="config-profile-summary-grid compact-top">
-                {buildProfileSummaryGroups(effectiveConfigProfile).map((group) => (
-                  <article key={`${effectiveConfigProfile.id}-${group.label}`} className="config-profile-summary-card">
-                    <div className="stat-label">{group.label}</div>
-                    <div className="config-profile-summary-tags compact-top">
-                      {group.items.map((item) => (
-                        <span key={`${effectiveConfigProfile.id}-${group.label}-${item}`} className="status-pill config-profile-summary-tag">
-                          {item}
-                        </span>
-                      ))}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            </>
-          ) : null}
         </div>
-        <div className="notice">
-          <div className="stat-label">{t("watch.form.autoEditFrameworkTitle")}</div>
-          <div className="muted compact-top">{t("watch.form.autoEditFrameworkDescription")}</div>
+
+        <div className="auto-task-form-section">
+          <div className="auto-task-form-section-head">
+            <strong>任务类型</strong>
+            <span>决定自动创建到队列里的剪辑任务形态。</span>
+          </div>
           <div className="field-row compact-top">
             <SelectField
               label={t("watch.form.editMode")}
@@ -138,6 +122,14 @@ export function WatchRootFormPanel({
               onChange={(event) => onChange({ ...form, edit_mode: event.target.value as RootForm["edit_mode"] })}
               options={EDIT_MODE_OPTIONS.map((option) => ({ value: option.value, label: t(option.labelKey) }))}
             />
+            <SelectField
+              label={t("watch.form.workflowTemplate")}
+              value={form.workflow_template}
+              onChange={(event) => onChange({ ...form, workflow_template: event.target.value })}
+              options={workflowTemplateOptions}
+            />
+          </div>
+          <div className="field-row compact-top">
             <SelectField
               label={t("watch.form.automationLevel")}
               value={form.automation_level}
@@ -150,77 +142,124 @@ export function WatchRootFormPanel({
               onChange={(event) => onChange({ ...form, material_usage: event.target.value as RootForm["material_usage"] })}
               options={MATERIAL_USAGE_OPTIONS.map((option) => ({ value: option.value, label: t(option.labelKey) }))}
             />
-          </div>
-        </div>
-        <SelectField
-          label={t("watch.form.workflowTemplate")}
-          value={form.workflow_template}
-          onChange={(event) => onChange({ ...form, workflow_template: event.target.value })}
-          options={workflowTemplateOptions}
-        />
-        <TextField
-          label={t("watch.form.outputDir")}
-          value={form.output_dir}
-          onChange={(event) => onChange({ ...form, output_dir: event.target.value })}
-        />
-        <div className="field-row">
-          <CheckboxField
-            label={t("watch.form.recursive")}
-            checked={form.recursive}
-            onChange={(event) => onChange({ ...form, recursive: event.target.checked })}
-          />
-        </div>
-        <div className="field-row">
-          <SelectField
-            label={t("watch.form.ingestMode")}
-            value={form.ingest_mode}
-            onChange={(event) => onChange({ ...form, ingest_mode: event.target.value as RootForm["ingest_mode"] })}
-            options={[
-              { value: "task_only", label: t("watch.form.ingestModeTaskOnly") },
-              { value: "full_auto", label: t("watch.form.ingestModeFullAuto") },
-            ]}
-          />
-          <div className="watch-flow-mode-field">
-            <span>{t("watch.form.jobFlowMode")}</span>
-            <div className="watch-flow-mode-control" role="group" aria-label={t("watch.form.jobFlowMode")}>
-              {(["auto", "smart_assist"] as const).map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  className={classNames("watch-flow-mode-toggle", form.job_flow_mode === mode && "active")}
-                  onClick={() => onChange({ ...form, job_flow_mode: mode })}
-                >
-                  {t(`jobs.flowMode.${mode}`)}
-                </button>
-              ))}
+            <div className="watch-flow-mode-field">
+              <span>{t("watch.form.jobFlowMode")}</span>
+              <div className="watch-flow-mode-control" role="group" aria-label={t("watch.form.jobFlowMode")}>
+                {(["auto", "smart_assist"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={classNames("watch-flow-mode-toggle", form.job_flow_mode === mode && "active")}
+                    onClick={() => onChange({ ...form, job_flow_mode: mode })}
+                  >
+                    {t(`jobs.flowMode.${mode}`)}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
-          <SelectField
-            label={t("watch.form.scanMode")}
-            value={form.scan_mode}
-            onChange={(event) => onChange({ ...form, scan_mode: event.target.value as RootForm["scan_mode"] })}
-            options={[
-              { value: "fast", label: t("watch.form.fast") },
-              { value: "precise", label: t("watch.form.precise") },
-            ]}
+          <TextField
+            label={t("watch.form.outputDir")}
+            value={form.output_dir}
+            onChange={(event) => onChange({ ...form, output_dir: event.target.value })}
           />
         </div>
-        <div className="notice">
-          <div className="stat-label">{t("watch.form.ingestModeSummaryTitle")}</div>
-          <div className="muted compact-top">
-            {form.ingest_mode === "task_only"
-              ? t("watch.form.ingestModeTaskOnlyDescription")
-              : t("watch.form.ingestModeFullAutoDescription")}
+
+        <div className="auto-task-form-section warm">
+          <div className="auto-task-form-section-head">
+            <strong>创作者配置绑定</strong>
+            <span>自动创建任务时带入这套创作者、文案、包装和风格配置。</span>
           </div>
-          <div className="muted compact-top">{t("watch.form.productControlSummary")
-            .replace("{editMode}", t(`watch.form.editMode.${form.edit_mode}`))
-            .replace("{automationLevel}", t(`watch.form.automationLevel.${form.automation_level}`))
-            .replace("{materialUsage}", t(`watch.form.materialUsage.${form.material_usage}`))}
+          <SelectField
+            label="创作者配置"
+            value={form.config_profile_id}
+            onChange={(event) => onChange({ ...form, config_profile_id: event.target.value })}
+            options={configProfileOptions}
+          />
+          <div className="notice compact-top">
+            <div className="stat-label">
+              {form.config_profile_id ? t("watch.form.configProfileBoundTitle") : t("watch.form.configProfileFallbackTitle")}
+            </div>
+            <div className="muted compact-top">
+              {form.config_profile_id
+                ? t("watch.form.configProfileBoundDescription")
+                : t("watch.form.configProfileFallbackDescription")}
+            </div>
+            {effectiveConfigProfile ? (
+              <>
+                <div className="compact-top">
+                  <strong>{effectiveConfigProfile.name}</strong>
+                  {boundConfigProfile ? null : <span className="status-pill done" style={{ marginLeft: 8 }}>{t("watch.form.followingActiveProfile")}</span>}
+                  {effectiveConfigProfile.is_active ? <span className="status-pill done" style={{ marginLeft: 8 }}>{t("watch.form.currentActiveProfile")}</span> : null}
+                </div>
+                {effectiveConfigProfile.description ? <div className="muted compact-top">{effectiveConfigProfile.description}</div> : null}
+                <div className="muted compact-top">{t("watch.form.profileUpdatedAt")}: {new Date(effectiveConfigProfile.updated_at).toLocaleString()}</div>
+                <div className="config-profile-summary-grid compact-top">
+                  {buildProfileSummaryGroups(effectiveConfigProfile).map((group) => (
+                    <article key={`${effectiveConfigProfile.id}-${group.label}`} className="config-profile-summary-card">
+                      <div className="stat-label">{group.label}</div>
+                      <div className="config-profile-summary-tags compact-top">
+                        {group.items.map((item) => (
+                          <span key={`${effectiveConfigProfile.id}-${group.label}-${item}`} className="status-pill config-profile-summary-tag">
+                            {item}
+                          </span>
+                        ))}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </>
+            ) : null}
           </div>
-          {form.job_flow_mode === "smart_assist" ? (
-            <div className="muted compact-top">{t("watch.form.jobFlowModeSmartAssistDescription")}</div>
-          ) : null}
         </div>
+
+        <div className="auto-task-form-section">
+          <div className="auto-task-form-section-head">
+            <strong>入队策略</strong>
+            <span>检测到新文件后，自动任务会创建普通剪辑任务。</span>
+          </div>
+          <div className="auto-task-policy-control" role="group" aria-label="入队策略">
+            {([
+              {
+                value: "full_auto",
+                title: "检测到新文件后立即开始",
+                description: "创建队列任务并自动启动剪辑流程。",
+              },
+              {
+                value: "task_only",
+                title: "加入队列，手动开始",
+                description: "只创建待处理任务，回到制片队列人工启动。",
+              },
+            ] as const).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className={classNames("auto-task-policy-option", form.ingest_mode === option.value && "active")}
+                  onClick={() => onChange({ ...form, ingest_mode: option.value })}
+                >
+                  <strong>{option.title}</strong>
+                  <span>{option.description}</span>
+                </button>
+              ))}
+          </div>
+          <div className="notice compact-top">
+            <div className="stat-label">{t("watch.form.ingestModeSummaryTitle")}</div>
+            <div className="muted compact-top">
+              {form.ingest_mode === "task_only"
+                ? t("watch.form.ingestModeTaskOnlyDescription")
+                : t("watch.form.ingestModeFullAutoDescription")}
+            </div>
+            <div className="muted compact-top">{t("watch.form.productControlSummary")
+              .replace("{editMode}", t(`watch.form.editMode.${form.edit_mode}`))
+              .replace("{automationLevel}", t(`watch.form.automationLevel.${form.automation_level}`))
+              .replace("{materialUsage}", t(`watch.form.materialUsage.${form.material_usage}`))}
+            </div>
+            {form.job_flow_mode === "smart_assist" ? (
+              <div className="muted compact-top">{t("watch.form.jobFlowModeSmartAssistDescription")}</div>
+            ) : null}
+          </div>
+        </div>
+
         <div className="field-row">
           <CheckboxField label={t("watch.form.enabled")} checked={form.enabled} onChange={(event) => onChange({ ...form, enabled: event.target.checked })} />
         </div>

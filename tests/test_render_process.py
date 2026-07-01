@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -359,3 +360,54 @@ async def test_intro_outro_normalizes_audio_to_segment_video_duration(
     assert "-c:v" in commands[0]
     assert commands[0][commands[0].index("-c:v") + 1] == "libx264"
     assert commands[0][commands[0].index("-threads") + 1] == "2"
+
+
+@pytest.mark.asyncio
+async def test_intro_outro_resolves_container_prefixed_windows_asset_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "source.mp4"
+    intro = tmp_path / "intro.mp4"
+    output = tmp_path / "with_bookends.mp4"
+    source.write_bytes(b"source")
+    intro.write_bytes(b"intro")
+    prepared_sources: list[Path] = []
+
+    def fake_resolve_runtime_media_path(value: str) -> Path:
+        if value.startswith("/app/E:/"):
+            return intro
+        return Path(value)
+
+    async def fake_prepare_packaging_clip(source_path, output_path, **_kwargs):
+        prepared_sources.append(source_path)
+        output_path.write_bytes(b"prepared")
+        return output_path
+
+    def fake_probe_duration(path):
+        return 3.0 if "intro_asset.prepared" in str(path) else 12.0
+
+    async def fake_run_process(cmd: list[str], *, timeout: int):
+        output.write_bytes(b"bookends")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(render_module, "resolve_runtime_media_path", fake_resolve_runtime_media_path)
+    monkeypatch.setattr(render_module, "_prepare_packaging_clip", fake_prepare_packaging_clip)
+    monkeypatch.setattr(render_module, "_probe_duration", fake_probe_duration)
+    monkeypatch.setattr(render_module, "_probe_stream_duration", lambda path, codec_type: fake_probe_duration(path))
+    monkeypatch.setattr(render_module, "_run_process", fake_run_process)
+    monkeypatch.setattr(render_module, "_write_debug_text", lambda *args, **kwargs: None)
+    monkeypatch.setattr(render_module, "_write_process_debug", lambda *args, **kwargs: None)
+
+    result = await render_module._apply_intro_outro(
+        source,
+        intro_plan={"path": "/app/E:/WorkSpace/RoughCut/assets/packaging/intro/fas.mp4"},
+        outro_plan=None,
+        expected_width=1920,
+        expected_height=1080,
+        output_path=output,
+        debug_dir=None,
+    )
+
+    assert result == output
+    assert prepared_sources == [intro]

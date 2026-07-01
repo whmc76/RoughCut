@@ -101,6 +101,45 @@ def test_open_host_path_maps_runtime_mount_and_opens_on_host(tmp_path, monkeypat
     assert result == {"path": str(target.resolve()), "kind": "folder"}
 
 
+def test_open_publication_entry_opens_bound_browser_profile_on_host(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_open(url: str, *, browser_binding: dict[str, object], allow_host_bridge: bool) -> dict[str, object]:
+        captured["url"] = url
+        captured["browser_binding"] = browser_binding
+        captured["allow_host_bridge"] = allow_host_bridge
+        return {
+            "opened": True,
+            "url": url,
+            "used_binding": True,
+            "mode": "browser_profile",
+        }
+
+    monkeypatch.setattr(codex_host_bridge, "open_publication_entry_url", fake_open)
+
+    result = codex_host_bridge.open_publication_entry(
+        {
+            "url": "https://member.example.com/upload",
+            "browser_binding": {
+                "browser": "chrome",
+                "user_data_dir": "C:/Users/demo/AppData/Local/Google/Chrome/User Data",
+                "profile_directory": "Profile 2",
+            },
+        }
+    )
+
+    assert captured == {
+        "url": "https://member.example.com/upload",
+        "browser_binding": {
+            "browser": "chrome",
+            "user_data_dir": "C:/Users/demo/AppData/Local/Google/Chrome/User Data",
+            "profile_directory": "Profile 2",
+        },
+        "allow_host_bridge": False,
+    }
+    assert result["launch_source"] == "codex_host_bridge"
+
+
 def test_sync_smart_copy_directory_merges_materialized_output_back_to_source(tmp_path, monkeypatch) -> None:
     host_output_root = tmp_path / "runtime"
     source_material_dir = host_output_root / "host-intelligent-copy" / "abc-demo" / "smart-copy"

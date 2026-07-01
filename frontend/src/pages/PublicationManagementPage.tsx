@@ -428,8 +428,9 @@ export function PublicationManagementPage() {
   return (
     <section className="page-stack asset-workspace-page">
       <PageHeader
-        eyebrow="创作资产"
-        title="智能发布管理"
+        eyebrow="资产库"
+        title="平台发布档案"
+        description="维护创作者平台绑定、发布档案和登录确认，不承担发布执行。"
       />
       <section className="page-section asset-workspace-section asset-workspace-section-plain">
         <div className="page-section-body">

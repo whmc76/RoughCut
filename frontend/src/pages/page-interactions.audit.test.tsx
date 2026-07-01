@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
@@ -15,6 +17,8 @@ const apiMock = vi.hoisted(() => ({
   getRemixProductionTasks: vi.fn(),
   createRemixProductionTaskJob: vi.fn(),
   startRemixProductionJob: vi.fn(),
+  getJobDownloadFiles: vi.fn(),
+  jobRenderedFileUrl: vi.fn(),
 }));
 
 vi.mock("../api", () => ({
@@ -98,9 +102,20 @@ vi.mock("../features/settings/CreativeSettingsPanel", () => ({
 }));
 
 vi.mock("../features/jobs/JobQueueTable", () => ({
-  JobQueueTable: () => (
+  JobQueueTable: ({
+    jobs = [],
+  }: {
+    jobs?: Array<{ id: string; status?: string }>;
+  }) => (
     <div data-testid="job-queue-table">
       job queue table
+      {jobs.map((job) => (
+        job.status === "done" ? (
+          <span key={job.id}>
+            <a href={`/final-review?job=${encodeURIComponent(job.id)}`}>去审看</a>
+          </span>
+        ) : null
+      ))}
     </div>
   ),
 }));
@@ -371,6 +386,8 @@ beforeEach(() => {
     detail: "started",
     command: [],
   });
+  apiMock.getJobDownloadFiles.mockResolvedValue({ job_id: "job-1", files: [] });
+  apiMock.jobRenderedFileUrl.mockImplementation((jobId: string, variant = "auto") => `/media/${jobId}/${variant}.mp4`);
   jobWorkspaceMock.mockReturnValue(buildJobWorkspaceMock());
   settingsWorkspaceMock.mockReturnValue(buildSettingsWorkspaceMock());
 });
@@ -383,7 +400,10 @@ describe("JobsPage audit interactions", () => {
     renderWithQueryClient(
       <I18nProvider>
         <MemoryRouter initialEntries={["/jobs"]}>
-          <JobsPage />
+          <Routes>
+            <Route path="/jobs" element={<JobsPage />} />
+            <Route path="/final-review" element={<div data-testid="final-review-route">成片审看路由</div>} />
+          </Routes>
         </MemoryRouter>
       </I18nProvider>,
     );
@@ -558,6 +578,130 @@ describe("JobsPage audit interactions", () => {
       }));
     });
     expect(apiMock.createRemixProductionTaskJob).not.toHaveBeenCalled();
+  });
+
+  it("surfaces production handoff as the first jobs workflow", async () => {
+    apiMock.getJobDownloadFiles.mockResolvedValueOnce({
+      job_id: "job-1",
+      files: [
+        {
+          id: "enhanced_mp4",
+          label: "增强成片",
+          filename: "final-enhanced.mp4",
+          kind: "video",
+          size_bytes: 1048576,
+          recommended: true,
+        },
+      ],
+    });
+    jobWorkspaceMock.mockReturnValue(buildJobWorkspaceMock({
+      queueStats: {
+        total: 3,
+        pending: 1,
+        running: 1,
+        done: 1,
+        attention: 1,
+        needsReview: 1,
+        failed: 0,
+        cancelled: 0,
+      },
+      filteredJobs: [
+        {
+          id: "job-1",
+          source_name: "成片测试.mp4",
+          status: "done",
+          language: "zh-CN",
+          workflow_mode: "standard_edit",
+          job_flow_mode: "auto",
+          enhancement_modes: [],
+          progress_percent: 100,
+          publication_summary: "B站和视频号待发布",
+          created_at: "2026-06-29T10:00:00Z",
+          updated_at: "2026-06-29T10:30:00Z",
+          steps: [],
+        },
+        {
+          id: "job-2",
+          source_name: "生产中.mp4",
+          status: "running",
+          language: "zh-CN",
+          workflow_mode: "standard_edit",
+          job_flow_mode: "auto",
+          enhancement_modes: [],
+          progress_percent: 42,
+          created_at: "2026-06-29T09:00:00Z",
+          updated_at: "2026-06-29T10:20:00Z",
+          steps: [],
+        },
+        {
+          id: "job-3",
+          source_name: "待核对.mp4",
+          status: "needs_review",
+          language: "zh-CN",
+          workflow_mode: "standard_edit",
+          job_flow_mode: "auto",
+          enhancement_modes: [],
+          progress_percent: 80,
+          created_at: "2026-06-29T08:00:00Z",
+          updated_at: "2026-06-29T10:10:00Z",
+          steps: [],
+        },
+      ],
+    }));
+
+    renderWithQueryClient(
+      <I18nProvider>
+        <MemoryRouter initialEntries={["/jobs"]}>
+          <JobsPage />
+        </MemoryRouter>
+      </I18nProvider>,
+    );
+
+    expect(screen.getByLabelText("制片队列工作台")).toBeInTheDocument();
+    expect(screen.getByText("Production Queue")).toBeInTheDocument();
+    expect(screen.getByText("生产状态带")).toBeInTheDocument();
+    expect(screen.getByText("完成输出")).toBeInTheDocument();
+    expect(screen.getByText("成片测试.mp4")).toBeInTheDocument();
+
+    const finalReviewLink = screen.getByRole("link", { name: "审看完成输出" });
+    expect(finalReviewLink).toHaveAttribute("href", "/final-review?job=job-1");
+    expect(apiMock.getJobDownloadFiles).not.toHaveBeenCalled();
+  });
+
+  it("routes completed queue jobs to final review without queue-level publication or download actions", async () => {
+    jobWorkspaceMock.mockReturnValue(buildJobWorkspaceMock({
+      filteredJobs: [
+        {
+          id: "job-1",
+          source_name: "成片测试.mp4",
+          status: "done",
+          language: "zh-CN",
+          workflow_mode: "standard_edit",
+          job_flow_mode: "auto",
+          enhancement_modes: [],
+          progress_percent: 100,
+          created_at: "2026-06-29T10:00:00Z",
+          updated_at: "2026-06-29T10:30:00Z",
+          steps: [],
+        },
+      ],
+    }));
+
+    renderWithQueryClient(
+      <I18nProvider>
+        <MemoryRouter initialEntries={["/jobs"]}>
+          <Routes>
+            <Route path="/jobs" element={<JobsPage />} />
+            <Route path="/final-review" element={<div data-testid="final-review-route">成片审看路由</div>} />
+          </Routes>
+        </MemoryRouter>
+      </I18nProvider>,
+    );
+
+    expect(screen.getByRole("link", { name: "去审看" })).toHaveAttribute("href", "/final-review?job=job-1");
+    expect(screen.queryByRole("link", { name: "发布交接" })).not.toBeInTheDocument();
+    expect(apiMock.getJobDownloadFiles).not.toHaveBeenCalled();
+    expect(apiMock.jobRenderedFileUrl).not.toHaveBeenCalled();
   });
 
   it("opens the film remix create modal from the header action", () => {
@@ -1040,26 +1184,24 @@ describe("JobsPage audit interactions", () => {
   });
 });
 describe("SettingsPage audit interactions", () => {
-  it("renders hidden secondary entry points and navigates to a hidden route", () => {
+  it("renders unified secondary entry points and navigates to the knowledge calibration route", () => {
     renderWithQueryClient(
       <I18nProvider>
         <MemoryRouter initialEntries={["/settings"]}>
           <Routes>
             <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/memory" element={<div>Memory route</div>} />
-            <Route path="/glossary" element={<div>Glossary route</div>} />
+            <Route path="/terms-memory" element={<div>Terms memory route</div>} />
             <Route path="/control" element={<div>Control route</div>} />
           </Routes>
         </MemoryRouter>
       </I18nProvider>,
     );
 
-    expect(screen.getByRole("link", { name: "记忆页" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "词表页" })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "打开控制页" })).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "打开术语与记忆" }).length).toBeGreaterThan(0);
+    expect(screen.getByRole("link", { name: "打开服务控制" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("link", { name: "记忆页" }));
-    expect(screen.getByText("Memory route")).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("link", { name: "打开术语与记忆" })[0]);
+    expect(screen.getByText("Terms memory route")).toBeInTheDocument();
   });
 
   it("does not reset settings when confirm is cancelled", () => {

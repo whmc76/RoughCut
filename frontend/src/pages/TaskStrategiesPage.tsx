@@ -133,9 +133,9 @@ export function TaskStrategiesPage() {
   return (
     <section className="page-stack asset-workspace-page">
       <PageHeader
-        eyebrow="创作资产"
-        title="任务策略库"
-        description="生成、对比并调整创作者剪辑策略。"
+        eyebrow="资产库"
+        title="任务策略"
+        description="生成、比较、激活剪辑策略，并明确适用任务和审核门槛。"
       />
       <section className="page-section asset-workspace-section asset-workspace-section-plain">
         <div className="page-section-body">

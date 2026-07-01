@@ -2811,7 +2811,7 @@ def _build_claim_grounded_repair_prompt(
         "只能替换 unsupported_span 所在表达，不能重写整套文案，不能新增 claim。"
         "修复后的每个标题、简介句子、标签仍必须带 claim_refs。"
         "如果审核来自 publish_quality_gate，必须补齐对应平台的 titles/description/tags，并保留其他已通过平台。"
-        "如果缺少整个平台字段，必须按原 schema 补齐该平台，不能省略。"
+        "如果缺少整个平台字段，必须按原 schema 输出完整平台字段。"
         "如果审核指出“抢到/抢购成功”不被支持，优先改成“到手/收到/难抢/抢购难度上升”中被 claim 支持的表达。"
         "如果某个 unsupported_span 没有可支持替代表达，就删除该表达。"
         "只返回完整 JSON，结构与原 draft 一致。"

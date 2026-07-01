@@ -42,13 +42,13 @@ export function JobReviewConfigSection({
       </div>
       <div className="toolbar compact-top">
         <Link className="button ghost button-sm" to="/task-strategies">
-          打开任务策略库
+          打开任务策略
         </Link>
         <Link className="button ghost button-sm" to="/visual-plans">
-          打开智能视觉方案
+          打开视觉方案
         </Link>
         <Link className="button ghost button-sm" to="/publication-management">
-          打开智能发布管理
+          打开平台发布档案
         </Link>
       </div>
 

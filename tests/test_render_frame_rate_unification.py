@@ -18,6 +18,7 @@ from roughcut.media.render import (
     _build_timed_overlay_filter_chain,
     _build_hyperframes_visual_filters,
     _build_overlay_only_editing_accents,
+    _build_emphasis_overlay_filters,
     _normalize_render_emphasis_overlays,
     _normalize_watermark_plan,
     _default_dynamic_text_watermark_plan,
@@ -505,6 +506,33 @@ def test_hyperframes_progress_filter_prefers_llm_short_chapter_titles() -> None:
     assert "分仓收纳" not in filter_text
 
 
+def test_hyperframes_subtitle_emphasis_filter_uses_social_bubble_tags() -> None:
+    plan = hyperframes_module.build_render_plan(
+        width=1920,
+        height=1080,
+        duration_sec=6.0,
+        subtitle_items=[
+            {"start_time": 0.5, "end_time": 1.4, "text_final": "你看这个快拆结构很明显", "subtitle_unit_role": "lead"}
+        ],
+    )
+
+    filter_parts, video_label = _build_hyperframes_visual_filters(
+        "v0",
+        plan,
+        render_w=1920,
+        render_h=1080,
+    )
+    filter_text = ";".join(filter_parts)
+
+    assert video_label == "vhftext0"
+    assert "text='快拆结构很明显'" in filter_text
+    assert "boxcolor=0xff4f9a@0.70" in filter_text
+    assert "bordercolor=0xffffff@0.76" in filter_text
+    assert "shadowcolor=black@0.22" in filter_text
+    assert "alpha='if(lt(t\\,0.5)" in filter_text
+    assert "enable='between" not in filter_text
+
+
 def test_smart_editing_accents_use_social_packaging_density_by_default() -> None:
     subtitle_items = [
         {"start_time": 0.2, "end_time": 1.0, "text_final": "你看这个快拆结构", "subtitle_unit_role": "lead"},
@@ -547,6 +575,30 @@ def test_smart_editing_accents_use_social_packaging_density_by_default() -> None
     assert any("快拆" in text for text in overlay_texts)
     assert sum(any(keyword in text for keyword in ("演示", "容量", "对比", "实测", "背负", "功能")) for text in overlay_texts) >= 3
     assert all("一下" not in text for text in overlay_texts)
+
+
+def test_render_emphasis_overlays_use_bubble_tag_tokens() -> None:
+    filter_parts, video_label = _build_emphasis_overlay_filters(
+        "v0",
+        {
+            "style": "smart_effect_commercial",
+            "emphasis_overlays": [
+                {
+                    "text": "快拆结构",
+                    "start_time": 1.0,
+                    "end_time": 2.0,
+                    "visual_treatment": "keyword_sticker",
+                }
+            ],
+        },
+    )
+    filter_text = ";".join(filter_parts)
+
+    assert video_label == "vfx0"
+    assert "boxcolor=0xfff0a6@0.78" in filter_text
+    assert "bordercolor=0x55f0d0@0.76" in filter_text
+    assert "shadowcolor=black@0.20" in filter_text
+    assert "boxborderw=18" in filter_text
 
 
 def test_smart_editing_accents_do_not_promote_long_spoken_lines_to_popups() -> None:

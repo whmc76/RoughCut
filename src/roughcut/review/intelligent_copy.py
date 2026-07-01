@@ -61,7 +61,7 @@ from roughcut.intelligent_copy_layout import (
     smart_copy_platform_tags_path,
     smart_copy_platform_titles_path,
 )
-from roughcut.media.output import _extract_frame, _overlay_title_layout, _probe_duration, _sample_cover_candidates, _title_style_tokens
+from roughcut.media.output import _extract_frame, _probe_duration, _sample_cover_candidates
 from roughcut.packaging.library import list_packaging_assets
 from roughcut.providers.image_generation import (
     CodexImageGenerationPending,
@@ -145,7 +145,7 @@ COVER_IMAGE_STYLE_SCHEMES: dict[str, dict[str, str]] = {
     OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO: {
         "label": "EDC 电影英雄封面",
         "prompt": (
-            "风格：EDC 电影英雄封面，暖金暗色史诗背景，场景层次明显，背景不能单调留白。"
+            "风格：EDC 电影英雄封面，暖金暗色史诗背景，场景层次丰富。"
             "有高能电光、雷电、火花、火焰余烬、速度线和赛博朋克发光轮廓，但都只服务主体，不盖过商品。"
             "主体要像英雄物件，金属高光强，暗部对比足，风格化明显，但商品本身保持真实。"
             "整体像成熟短视频爆款封面，而不是普通产品海报。"
@@ -176,8 +176,8 @@ COVER_IMAGE_STYLE_SCHEMES: dict[str, dict[str, str]] = {
         "label": "儿童绘本育儿封面",
         "prompt": (
             "风格：儿童绘本育儿封面，明亮温暖，高饱和但不刺眼，像亲子教育类动画解读内容。"
-            "画面要保留参考帧里的动画角色和家庭场景关系，不重绘成陌生角色，不改人物数量和位置。"
-            "背景可以做柔和阳光、贴纸、蜡笔纸纹、气泡提示和绘本边框，但不要遮挡角色表情。"
+            "画面保留参考帧里的动画角色、家庭场景关系、人物数量和位置。"
+            "背景可以做柔和阳光、贴纸、蜡笔纸纹、气泡提示和绘本边框，并保持角色表情清楚。"
             "标题要像儿童视频包装：圆润大字、白色或奶油底、彩色描边，信息清楚、情绪积极、适合家长一眼理解。"
         ),
     },
@@ -258,20 +258,20 @@ SUBJECT_FIDELITY_SCHEME_PROFILES: dict[str, dict[str, Any]] = {
     "generic_subject_fidelity_v1": {
         "description": "通用主体保真：不改变主体身份、几何关系、主要部件布局和状态映射。",
         "edit_budget_prompt": (
-            "主体编辑预算必须极小：只允许做清晰度、光影、材质质感和背景氛围增强；"
-            "不允许重设计主体几何、主要部件数量、相对位置、表面分区、状态映射或版本对应关系。"
+            "主体编辑预算必须极小：集中做清晰度、光影、材质质感和背景氛围增强；"
+            "主体几何、主要部件数量、相对位置、表面分区、状态映射和版本对应关系保持稳定。"
         ),
         "generic_constraints": [
             "主体一致性是最高优先级：不改商品身份、不改品牌归属、不改核心结构。",
-            "保留主体主要轮廓、比例关系、主要部件数量与相对位置，不要凭空增删硬件或结构层级。",
-            "保留主体表面分区、材质关系和版本差异，不要把不同版本特征互换。",
+            "保留主体主要轮廓、比例关系、主要部件数量与相对位置，硬件与结构层级保持稳定。",
+            "保留主体表面分区、材质关系和版本差异，版本特征保持各自对应关系。",
         ],
     },
     "parenting_animation_character_fidelity_v1": {
         "description": "亲子动画角色保真：不改变动画角色身份、角色数量、表情动作、亲子互动关系和原片场景关系。",
         "edit_budget_prompt": (
-            "主体编辑预算必须极小：只允许做清晰度、柔和光影、绘本质感、贴纸气泡和标题包装增强；"
-            "不允许重设计角色外形、角色数量、表情关系、动作关系或亲子互动关系。"
+            "主体编辑预算必须极小：集中做清晰度、柔和光影、绘本质感、贴纸气泡和标题包装增强；"
+            "角色外形、角色数量、表情关系、动作关系和亲子互动关系保持稳定。"
         ),
         "generic_constraints": [
             "角色一致性是最高优先级：不改动画角色身份、角色数量、表情动作和亲子互动关系。",
@@ -499,7 +499,13 @@ async def _resolve_packaging_and_cover_context(
     resolved_copy_style: str,
     existing_result: dict[str, Any] | None,
     existing_cover_path: Path | None,
+    force_regenerate: bool = False,
 ) -> dict[str, Any]:
+    resume_packaging = (
+        _drop_packaging_platforms(existing_packaging, platform_keys=platforms_requiring_regeneration)
+        if force_regenerate
+        else existing_packaging
+    )
     seed_generated_packaging: dict[str, Any] | None = None
     if platforms_requiring_regeneration:
         seed_generated_packaging = _filter_intelligent_copy_packaging(
@@ -510,7 +516,7 @@ async def _resolve_packaging_and_cover_context(
             platforms_requiring_regeneration,
         )
     cover_seed_packaging = _merge_resume_packaging(
-        existing_packaging=existing_packaging,
+        existing_packaging=resume_packaging,
         generated_packaging=seed_generated_packaging,
         platform_keys=selected_platform_keys,
     )
@@ -540,9 +546,9 @@ async def _resolve_packaging_and_cover_context(
                     "copy_brief": copy_brief,
                     "content_profile_summary": _content_profile_summary(content_profile),
                     "requirements": [
-                        "最终发布文案必须自然、像真人发布，不要模板腔、总结腔、AI味。",
-                        "不要用空话凑长度；没有事实证据就写体验、画面和观感，不写参数。",
-                        "平台差异只能来自规则约束，不能主动注入不同内容角度或强制人设。",
+                        "最终发布文案必须自然、像真人发布，语气具体、有现场感。",
+                        "篇幅来自真实体验、画面和观感；参数只使用已有事实证据。",
+                        "平台差异来自规则约束，内容角度和表达身份保持一致。",
                     ],
                 },
             )
@@ -565,8 +571,13 @@ async def _resolve_packaging_and_cover_context(
         except Exception:
             packaging_task.cancel()
             generated_packaging = fallback_generated_packaging
+        generated_packaging = _merge_resume_packaging(
+            existing_packaging=fallback_generated_packaging,
+            generated_packaging=generated_packaging,
+            platform_keys=platforms_requiring_regeneration,
+        )
     packaging = _merge_resume_packaging(
-        existing_packaging=existing_packaging,
+        existing_packaging=resume_packaging,
         generated_packaging=generated_packaging,
         platform_keys=selected_platform_keys,
     )
@@ -708,6 +719,89 @@ def _synchronize_publishable_root_files(*, material_dir: Path, material_entries:
                 candidate.unlink(missing_ok=True)
 
 
+_COVER_MATRIX_ROOT_FILENAME_BY_GROUP = {
+    "landscape_16_9": "cover-16x9.jpg",
+    "landscape_4_3": "cover-4x3.jpg",
+    "portrait_3_4": "cover-3x4.jpg",
+}
+
+
+def _resolve_final_title_cover_path(*, material_dir: Path) -> Path | None:
+    final_cover_path = material_dir.parent / "cover.jpg"
+    try:
+        if final_cover_path.exists() and final_cover_path.is_file():
+            return final_cover_path.resolve()
+    except OSError:
+        return None
+    return None
+
+
+def _synchronize_cover_matrix_root_files(*, material_dir: Path, cover_matrix: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    task_dir = material_dir.parent
+    filename_by_group = _COVER_MATRIX_ROOT_FILENAME_BY_GROUP
+    updated_matrix = {str(key): dict(value) for key, value in (cover_matrix or {}).items() if isinstance(value, dict)}
+    expected_names = set(filename_by_group.values())
+    final_title_cover_path = _resolve_final_title_cover_path(material_dir=material_dir)
+    for group_key, filename in filename_by_group.items():
+        node = updated_matrix.get(group_key, {})
+        matrix_source_path = Path(str(node.get("cover_path") or "")).expanduser()
+        source_path = final_title_cover_path or matrix_source_path
+        target_path = task_dir / filename
+        blocking_reasons = [str(item).strip() for item in (node.get("blocking_reasons") or []) if str(item).strip()]
+        source_ready = bool(final_title_cover_path) or (bool(node.get("publish_ready")) and not blocking_reasons)
+        if source_ready and source_path.exists() and source_path.is_file():
+            try:
+                if source_path.resolve() != target_path.resolve():
+                    cover_size = node.get("cover_size") if isinstance(node.get("cover_size"), list) else []
+                    width = int(cover_size[0]) if len(cover_size) >= 1 and cover_size[0] else 0
+                    height = int(cover_size[1]) if len(cover_size) >= 2 and cover_size[1] else 0
+                    if width > 0 and height > 0:
+                        fit_mode = _resolve_cover_canvas_fit_mode(
+                            source_path=source_path,
+                            width=width,
+                            height=height,
+                        )
+                        _fit_image_to_canvas(
+                            source_path=source_path,
+                            output_path=target_path,
+                            width=width,
+                            height=height,
+                            fit_mode=fit_mode,
+                        )
+                    else:
+                        shutil.copy2(source_path, target_path)
+                node["root_cover_path"] = str(target_path)
+            except OSError:
+                node.pop("root_cover_path", None)
+        else:
+            target_path.unlink(missing_ok=True)
+            node.pop("root_cover_path", None)
+        updated_matrix[group_key] = node
+    for candidate in task_dir.glob("cover-*x*.jpg"):
+        if candidate.name not in expected_names and candidate.is_file():
+            candidate.unlink(missing_ok=True)
+    return updated_matrix
+
+
+def _resolve_cover_matrix_root_cover_path(
+    *,
+    material_dir: Path,
+    group_key: str,
+    group_cover_path: Path | None = None,
+) -> Path | None:
+    del group_cover_path
+    filename = _COVER_MATRIX_ROOT_FILENAME_BY_GROUP.get(str(group_key or "").strip())
+    if not filename:
+        return None
+    root_cover_path = material_dir.parent / filename
+    try:
+        if not root_cover_path.exists() or not root_cover_path.is_file():
+            return None
+        return root_cover_path.resolve()
+    except OSError:
+        return None
+
+
 def _ensure_declared_platform_cover_files_exist(*, material_dir: Path, platform_materials: list[dict[str, Any]]) -> None:
     for material in platform_materials:
         raw_target = str(material.get("cover_path") or "").strip()
@@ -719,6 +813,14 @@ def _ensure_declared_platform_cover_files_exist(*, material_dir: Path, platform_
         cover_generation = material.get("cover_generation") if isinstance(material.get("cover_generation"), dict) else {}
         cover_group = cover_generation.get("cover_group") if isinstance(cover_generation.get("cover_group"), dict) else {}
         source = _resolve_existing_material_cover_path(cover_group.get("cover_path"), material_dir=material_dir)
+        group_key = str(cover_group.get("key") or "").strip()
+        root_source = _resolve_cover_matrix_root_cover_path(
+            material_dir=material_dir,
+            group_key=group_key,
+            group_cover_path=source,
+        )
+        if root_source is not None:
+            source = root_source
         if source is None or not source.exists():
             continue
         target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -730,6 +832,7 @@ async def generate_intelligent_copy(
     *,
     copy_style: str | None = None,
     platforms: list[str] | None = None,
+    platform_options: dict[str, Any] | None = None,
     use_existing_cover: bool = False,
     force_regenerate: bool = False,
     creator_profile_id: str | None = None,
@@ -762,6 +865,12 @@ async def generate_intelligent_copy(
     if not subtitle_items:
         raise ValueError("字幕文件已找到，但无法解析出可用字幕内容。")
     selected_platform_keys = _resolve_intelligent_copy_platform_keys(platforms)
+    resolved_platform_options = {
+        key: dict(value)
+        for raw_key, value in (platform_options or {}).items()
+        for key in [_normalize_internal_publish_platform_key(raw_key)]
+        if key and isinstance(value, dict)
+    }
     material_dir = video_path.parent / MATERIAL_DIR_NAME
     material_dir.mkdir(parents=True, exist_ok=True)
     _prepare_structured_smart_copy_layout(material_dir)
@@ -888,6 +997,7 @@ async def generate_intelligent_copy(
         resolved_copy_style=resolved_copy_style,
         existing_result=existing_result,
         existing_cover_path=cover_path,
+        force_regenerate=force_regenerate,
     )
     packaging = dict(cover_context["packaging"] or {})
     creator_publication_policy = _build_intelligent_copy_creator_publication_policy(
@@ -993,6 +1103,7 @@ async def generate_intelligent_copy(
         "publication_context": {
             "creator_profile_id": str(creator_profile_id or "").strip() or None,
             "creator_profile_name": str(creator_profile_name or "").strip() or None,
+            "platform_options": resolved_platform_options,
         },
     }
     await _emit_intelligent_copy_progress(
@@ -1048,6 +1159,9 @@ async def generate_intelligent_copy(
             creator_profile_name=creator_profile_name,
             rules=rules,
         )
+        option = resolved_platform_options.get(platform_key)
+        if isinstance(option, dict) and option:
+            _apply_platform_option_metadata(material=material, option=option)
         serial = index
         cover_output_path = smart_copy_platform_cover_path(material_dir, serial, platform_key)
         cover_group = _resolve_platform_cover_group(platform_key=platform_key, rules=rules)
@@ -1151,6 +1265,10 @@ async def generate_intelligent_copy(
     }
     _apply_material_contract_export_state(result, material_contract, blocking_reasons=blocking_reasons)
     result["cover_matrix"] = _serialize_cover_matrix(cover_group_cache)
+    result["cover_matrix"] = _synchronize_cover_matrix_root_files(
+        material_dir=material_dir,
+        cover_matrix=result["cover_matrix"],
+    )
     result["material_validation"] = material_validation
     result["material_review"] = material_review
     result["material_generation_contract"] = material_generation_contract
@@ -1640,6 +1758,10 @@ async def rerender_existing_intelligent_copy_cover_groups(
         "creator_profile_name": updated_result["creator_profile_name"],
     }
     updated_result["cover_matrix"] = _serialize_cover_matrix(cover_group_cache)
+    updated_result["cover_matrix"] = _synchronize_cover_matrix_root_files(
+        material_dir=material_dir,
+        cover_matrix=updated_result["cover_matrix"],
+    )
     updated_result["material_validation"] = material_validation
     updated_result["material_review"] = material_review
     updated_result["material_generation_contract"] = material_generation_contract
@@ -1846,6 +1968,10 @@ async def refresh_existing_intelligent_copy_cover_current_state(
         "creator_profile_name": updated_result["creator_profile_name"],
     }
     updated_result["cover_matrix"] = _serialize_cover_matrix(cover_group_cache)
+    updated_result["cover_matrix"] = _synchronize_cover_matrix_root_files(
+        material_dir=material_dir,
+        cover_matrix=updated_result["cover_matrix"],
+    )
     updated_result["material_validation"] = material_validation
     updated_result["material_review"] = material_review
     updated_result["material_generation_contract"] = material_generation_contract
@@ -2636,8 +2762,22 @@ def _restore_platform_cover_path(*, material: dict[str, Any], material_dir: Path
             material.pop("cover_path", None)
         return
 
-    if restored_group_cover.resolve() != target_cover_path.resolve():
-        shutil.copy2(restored_group_cover, target_cover_path)
+    cover_group_node = cover_generation.get("cover_group") if isinstance(cover_generation.get("cover_group"), dict) else {}
+    group_generation_node = cover_generation.get("group_generation") if isinstance(cover_generation.get("group_generation"), dict) else {}
+    nested_cover_group_node = (
+        group_generation_node.get("cover_group")
+        if isinstance(group_generation_node.get("cover_group"), dict)
+        else {}
+    )
+    group_key = str(cover_group_node.get("key") or nested_cover_group_node.get("key") or "").strip()
+    root_group_cover = _resolve_cover_matrix_root_cover_path(
+        material_dir=material_dir,
+        group_key=group_key,
+        group_cover_path=restored_group_cover,
+    )
+    source_cover_path = root_group_cover or restored_group_cover
+    if source_cover_path.resolve() != target_cover_path.resolve():
+        shutil.copy2(source_cover_path, target_cover_path)
     material["cover_path"] = str(target_cover_path)
     if isinstance(cover_generation, dict):
         image_generation = cover_generation.get("image_generation") if isinstance(cover_generation.get("image_generation"), dict) else {}
@@ -2733,17 +2873,27 @@ def _refresh_cover_group_reuse_platform_derivative(
             )
     if group_output_path is None or output_path is None or not group_output_path.exists():
         return
+    group_key = str(cover_group.get("key") or "").strip()
+    source_group_path = (
+        _resolve_final_title_cover_path(material_dir=material_dir)
+        or _resolve_cover_matrix_root_cover_path(
+            material_dir=material_dir,
+            group_key=group_key,
+            group_cover_path=group_output_path,
+        )
+        or group_output_path
+    )
     should_refresh = not output_path.exists()
     if not should_refresh:
         try:
-            should_refresh = output_path.stat().st_mtime + 1 < group_output_path.stat().st_mtime
+            should_refresh = output_path.stat().st_mtime + 1 < source_group_path.stat().st_mtime
         except Exception:
             should_refresh = True
     if not should_refresh:
         return
     refreshed_generation = _materialize_platform_cover_from_group(
         group_metadata=group_generation,
-        group_output_path=group_output_path,
+        group_output_path=source_group_path,
         output_path=output_path,
         platform_key=_normalize_internal_publish_platform_key(material.get("key")),
         platform_rules=rules,
@@ -3070,7 +3220,7 @@ async def _revalidate_existing_cover_generation_request(
     if str(request_payload.get("backend") or image_generation.get("backend") or "").strip().lower() != "codex_builtin":
         return refreshed
     title_lines = _extract_required_cover_title_lines_from_request_payload(request_payload)
-    verification_payload = await _ensure_generated_cover_title_contract_ready(
+    verification_payload = await _ensure_generated_cover_request_completed(
         request_path=request_path,
         request_payload=request_payload,
         output_path=output_path,
@@ -3461,6 +3611,31 @@ def _supplement_existing_packaging_from_material_files(
         return normalized
     normalized["platforms"] = platforms
     return normalized
+
+
+def _drop_packaging_platforms(
+    packaging: dict[str, Any] | None,
+    *,
+    platform_keys: list[str],
+) -> dict[str, Any] | None:
+    if not isinstance(packaging, dict) or not platform_keys:
+        return packaging
+    dropped_keys = {
+        _normalize_internal_publish_platform_key(item)
+        for item in platform_keys
+        if _normalize_internal_publish_platform_key(item)
+    }
+    if not dropped_keys:
+        return dict(packaging)
+    platforms = packaging.get("platforms") if isinstance(packaging.get("platforms"), dict) else {}
+    filtered_platforms = {
+        key: value
+        for key, value in platforms.items()
+        if _normalize_internal_publish_platform_key(key) not in dropped_keys
+    }
+    updated = dict(packaging)
+    updated["platforms"] = filtered_platforms
+    return updated
 
 
 def _merge_resume_packaging(
@@ -4315,8 +4490,16 @@ async def _build_intelligent_cover_brief(
         cover_source_manifest=cover_source_manifest,
         existing_cover_path=existing_cover_path,
     )
+    trusted_title_context = _build_cover_trusted_title_context(
+        video_path=video_path,
+        fallback=fallback,
+        content_profile=content_profile,
+        copy_brief=copy_brief,
+        packaging=packaging,
+    )
     context = {
         "source_name": video_path.name,
+        "trusted_title_terms": _extract_cover_trusted_title_terms(trusted_title_context),
         "content_profile": _content_profile_summary(content_profile),
         "copy_brief": copy_brief,
         "highlights": dict(packaging.get("highlights") or {}),
@@ -4325,18 +4508,21 @@ async def _build_intelligent_cover_brief(
         "cover_source_manifest": dict(cover_source_manifest or {}),
     }
     prompt = (
-        "你是短视频封面策划。请根据视频内容自己总结、提炼封面需求，不要套固定模板。"
+        "你是短视频封面策划。请根据视频内容自己总结、提炼封面需求，采用贴合内容的具体表达。"
         "你要判断视频类型，例如开箱、评测、对比、教程、种草、展示、实测等，"
         "再为图片模型准备简洁明确的封面 brief。\n"
-        "封面标题要求：必须短、强识别、适合图片模型直接渲染；不要使用完整文案句子；不要超过 14 个汉字左右。"
-        "如果能识别明确品牌、型号或商品名，cover_title 必须保留核心品牌/商品身份，不能只写材质、品类或卖点。"
+        "标题规范词硬约束：source_name、content_profile、copy_brief 和 highlights 里的品牌、类型、产品名、版本名"
+        "优先级高于 transcript_excerpt 和 platform_titles；如果 ASR 或平台文案样本里出现近音、近形或口误词，"
+        "cover_title/product_identity/critical_detail_notes 必须使用 trusted_title_terms 里的规范写法。"
+        "封面标题要求：短、强识别、适合图片模型直接渲染；使用标题短语，长度控制在 14 个汉字左右。"
+        "如果能识别明确品牌、型号或商品名，cover_title 必须保留核心品牌/商品身份，并组合材质、品类或卖点。"
         "background_strategy 用来决定生成阶段怎么处理背景，只能是 preserve_reference_background、enhance_reference_background、replace_background_if_needed 三选一。"
         "规则：如果参考图背景已经是刻意布置好的展示环境，优先 preserve 或 enhance；如果背景普通、杂乱、对点击率帮助不大，再用 replace_background_if_needed。"
         "critical_detail_notes 用来补充关键细节硬约束，适合描述容易被模型误读的结构语义，例如“镜面反光是实心金属不是开孔”。"
-        "它应该是一个字符串数组，每条都短、明确、只描述关键细节，不要写成长段解释。"
-        "不要走固定格式。你可以参考品牌/型号、商品类型、开箱/评测/对比/教程/超好玩/强烈推荐/夯爆了等信息，"
-        "但必须根据真实内容自行取舍、总结和改写，不能机械拼接。"
-        "EDC/工具内容要合规，不要危险导向，不要编参数。\n"
+        "它应该是一个字符串数组，每条都短、明确、只描述关键细节。"
+        "表达格式根据真实内容自行取舍、总结和改写；可参考品牌/型号、商品类型、开箱/评测/对比/教程/超好玩/强烈推荐/夯爆了等信息，"
+        "并形成自然标题。"
+        "EDC/工具内容保持合规、安全体验导向，参数来自可靠事实。\n"
         "只输出 JSON："
         '{"cover_title":"","video_type":"","product_identity":"","selling_angle":"","visual_brief":"","background_strategy":"","critical_detail_notes":[],"avoid":""}'
         f"\n视频上下文：{json.dumps(context, ensure_ascii=False)}"
@@ -4360,7 +4546,7 @@ async def _build_intelligent_cover_brief(
         payload = raw if isinstance(raw, dict) else json.loads(extract_json_text(str(raw)))
     except Exception:
         payload = {}
-    return _normalize_cover_brief_payload(payload, fallback=fallback)
+    return _normalize_cover_brief_payload(payload, fallback=fallback, trusted_title_context=trusted_title_context)
 
 
 def _build_fallback_cover_brief(
@@ -4402,42 +4588,154 @@ def _build_fallback_cover_brief(
             existing_cover_path=existing_cover_path,
         ),
         "critical_detail_notes": critical_detail_notes,
-        "avoid": "不要长句、参数、危险导向、乱码、额外文字。",
+        "avoid": "标题短语化、事实准确、安全体验导向、文字清晰。",
         "strategy_source": "fallback",
     }
 
 
-def _normalize_cover_brief_payload(payload: dict[str, Any], *, fallback: dict[str, Any]) -> dict[str, Any]:
+def _normalize_cover_brief_payload(
+    payload: dict[str, Any],
+    *,
+    fallback: dict[str, Any],
+    trusted_title_context: str = "",
+) -> dict[str, Any]:
     product_identity = _trim_to_display_units(
         str(payload.get("product_identity") or fallback.get("product_identity") or "").strip(),
         24,
     )
+    product_identity = _apply_cover_trusted_term_overrides(product_identity, trusted_title_context)
     title = _normalize_llm_cover_title(payload.get("cover_title"))
     source = "llm" if title and payload else str(fallback.get("strategy_source") or "fallback")
     if not title:
         title = str(fallback.get("cover_title") or "").strip()
+    title = _apply_cover_trusted_term_overrides(title, trusted_title_context or product_identity)
     title = _ensure_cover_title_keeps_identity(title, product_identity=product_identity)
+    selling_angle = _trim_to_display_units(
+        str(payload.get("selling_angle") or fallback.get("selling_angle") or "").strip(),
+        24,
+    )
+    selling_angle = _apply_cover_trusted_term_overrides(selling_angle, trusted_title_context or product_identity)
+    visual_brief = str(payload.get("visual_brief") or fallback.get("visual_brief") or "").strip()[:160]
+    visual_brief = _apply_cover_trusted_term_overrides(visual_brief, trusted_title_context or product_identity)
+    critical_detail_notes = [
+        _apply_cover_trusted_term_overrides(item, trusted_title_context or product_identity)
+        for item in _normalize_cover_critical_detail_notes(
+            payload.get("critical_detail_notes")
+            if payload.get("critical_detail_notes") is not None
+            else fallback.get("critical_detail_notes")
+        )
+    ]
     normalized = {
         "cover_title": title,
         "video_type": _trim_to_display_units(str(payload.get("video_type") or fallback.get("video_type") or "").strip(), 18),
         "product_identity": product_identity,
-        "selling_angle": _trim_to_display_units(
-            str(payload.get("selling_angle") or fallback.get("selling_angle") or "").strip(),
-            24,
-        ),
-        "visual_brief": str(payload.get("visual_brief") or fallback.get("visual_brief") or "").strip()[:160],
+        "selling_angle": selling_angle,
+        "visual_brief": visual_brief,
         "background_strategy": _normalize_cover_background_strategy(
             payload.get("background_strategy") or fallback.get("background_strategy") or ""
         ),
-        "critical_detail_notes": _normalize_cover_critical_detail_notes(
-            payload.get("critical_detail_notes")
-            if payload.get("critical_detail_notes") is not None
-            else fallback.get("critical_detail_notes")
-        ),
+        "critical_detail_notes": critical_detail_notes,
         "avoid": str(payload.get("avoid") or fallback.get("avoid") or "").strip()[:120],
         "strategy_source": source,
     }
     return normalized
+
+
+def _collect_cover_trusted_context_strings(value: Any, *, max_items: int = 80) -> list[str]:
+    collected: list[str] = []
+
+    def visit(node: Any) -> None:
+        if len(collected) >= max_items:
+            return
+        if isinstance(node, str):
+            text = re.sub(r"\s+", " ", node).strip()
+            if text:
+                collected.append(text[:120])
+            return
+        if isinstance(node, (int, float)):
+            collected.append(str(node))
+            return
+        if isinstance(node, dict):
+            for child in node.values():
+                visit(child)
+            return
+        if isinstance(node, (list, tuple, set)):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in collected:
+        key = re.sub(r"\s+", "", item).lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _build_cover_trusted_title_context(
+    *,
+    video_path: Path,
+    fallback: dict[str, Any],
+    content_profile: dict[str, Any],
+    copy_brief: dict[str, Any],
+    packaging: dict[str, Any],
+) -> str:
+    highlights = packaging.get("highlights") if isinstance(packaging.get("highlights"), dict) else {}
+    trusted_payload = {
+        "source_name": video_path.name,
+        "source_stem": video_path.stem,
+        "fallback": fallback,
+        "content_profile": content_profile,
+        "copy_brief": copy_brief,
+        "highlights": highlights,
+    }
+    return " | ".join(_collect_cover_trusted_context_strings(trusted_payload))
+
+
+def _extract_cover_trusted_title_terms(context: str) -> list[str]:
+    text = re.sub(r"\s+", " ", str(context or "")).strip()
+    if not text:
+        return []
+    terms: list[str] = []
+    for pattern in (
+        r"[A-Za-z0-9一-龥]{2,24}版",
+        r"[A-Za-z0-9一-龥]{2,24}款",
+        r"[A-Za-z0-9一-龥]{2,24}限量",
+        r"[A-Za-z0-9一-龥]{2,24}EDC[A-Za-z0-9一-龥]{0,12}",
+    ):
+        for match in re.finditer(pattern, text):
+            term = match.group(0).strip(" -_|，,。.!！?？()（）")
+            if term and term not in terms:
+                terms.append(term[:24])
+    compact = re.sub(r"\s+", "", text)
+    if "五彩碳马" in compact and "五彩碳马" not in terms:
+        terms.insert(0, "五彩碳马")
+    if "碳马版" in compact and "碳马版" not in terms:
+        terms.append("碳马版")
+    return terms[:20]
+
+
+def _apply_cover_trusted_term_overrides(value: str, trusted_context: Any) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    context = " ".join(_collect_cover_trusted_context_strings(trusted_context))
+    compact_context = re.sub(r"\s+", "", context)
+    if "五彩碳马" in compact_context or "碳马版" in compact_context:
+        replacements = (
+            ("五彩碳把（碳马版）", "五彩碳马版"),
+            ("五彩碳把(碳马版)", "五彩碳马版"),
+            ("五彩碳把 碳马版", "五彩碳马版"),
+            ("五彩碳把碳马版", "五彩碳马版"),
+            ("五彩碳把版", "五彩碳马版"),
+            ("五彩碳把", "五彩碳马"),
+        )
+        for source, target in replacements:
+            text = text.replace(source, target)
+    return text
 
 
 async def _resolve_restored_cover_brief(
@@ -4468,8 +4766,19 @@ async def _resolve_restored_cover_brief(
         str(persisted.get(key) or "").strip()
         for key in ("cover_title", "product_identity", "selling_angle", "visual_brief")
     )
+    trusted_title_context = _build_cover_trusted_title_context(
+        video_path=video_path,
+        fallback=fallback,
+        content_profile=content_profile,
+        copy_brief=copy_brief,
+        packaging=packaging,
+    )
     if persisted_has_payload and not intelligent_copy_cover_brief_fallback_reasons(persisted):
-        return _normalize_cover_brief_payload(persisted, fallback=fallback)
+        return _normalize_cover_brief_payload(
+            persisted,
+            fallback=fallback,
+            trusted_title_context=trusted_title_context,
+        )
     return await _maybe_await(_build_intelligent_cover_brief(
         video_path=video_path,
         subtitle_items=subtitle_items,
@@ -4600,9 +4909,9 @@ def _default_cover_critical_detail_notes(
     notes: list[str] = []
     if is_edc_blade:
         notes.append("保留原始刀型、开孔、转轴、柄部纹理和主要部件位置，不改款不变形。")
-        notes.append("保留螺丝数量、位置、开槽方向、边角切面和金属分区，不要凭空增删五金细节。")
+        notes.append("保留螺丝数量、位置、开槽方向、边角切面和金属分区，五金细节保持稳定。")
         notes.append("刀身镜面反光区域是实心金属高光，不是开孔、镂空、雕花或缺口。")
-        notes.append("不要给刀身添加不存在的浮雕、动物纹样、刻字或装饰图案。")
+        notes.append("刀身保持参考图中的原始表面语言、金属高光和装饰范围。")
     return _normalize_cover_critical_detail_notes(notes)
 
 
@@ -4623,7 +4932,7 @@ def _resolve_cover_background_strategy(
 def _background_strategy_prompt(strategy: str) -> str:
     normalized = _normalize_cover_background_strategy(strategy)
     if normalized == "preserve_reference_background":
-        return "背景策略：优先保留参考图里已有的背景布置、场景关系和展示环境，只做质感、光影和特效增强，不要把背景整体换掉。"
+        return "背景策略：延续参考图里已有的背景布置、场景关系和展示环境，只做质感、光影和特效增强。"
     if normalized == "enhance_reference_background":
         return "背景策略：保留参考图背景的核心布置和场景关系，但允许做更强的电影化增强，让背景更酷、更有能量感。"
     return "背景策略：背景不是硬约束；如果参考图背景已经布置完整且服务主体，可以保留并增强；如果背景普通、杂乱或不利于点击率，可以替换成更酷的电影化背景。"
@@ -4658,20 +4967,20 @@ def _cover_reference_pack_prompt(
 ) -> str:
     if _cover_style_is_children_storybook_parenting(style_key):
         if int(reference_count or 0) <= 1:
-            return "参考图语义：这是一张动画原片参考帧，必须保持画面里的同一动画角色、表情、场景关系和亲子互动，不要重绘成陌生角色。"
+            return "参考图语义：这是一张动画原片参考帧，必须保持画面里的同一动画角色、表情、场景关系和亲子互动。"
         return (
             "参考图语义：这是一组同一动画原片片段里的参考帧。"
             "第 1 张是主参考画面，其余图片只用于校正角色外形、表情、家庭场景和剧情关系。"
             "必须综合全部参考图保持同一动画角色身份、角色数量、亲子互动关系和原片场景氛围；"
-            "可以做儿童视频封面包装、柔和光影、贴纸气泡和绘本边框，但不能把角色改成陌生形象，也不能凭空增加无关主体。"
+            "可以做儿童视频封面包装、柔和光影、贴纸气泡和绘本边框，角色身份和主体关系保持原片一致。"
         )
     if int(reference_count or 0) <= 1:
         return "参考图语义：这是一张单参考图，直接保持这张图里的真实商品主体、主角度和结构关系。"
     return (
-        "参考图语义：这是一组同一真实商品或同一对比商品组的多角度参考图，不是不同商品。"
+        "参考图语义：这是一组同一真实商品或同一对比商品组的多角度参考图。"
         "第 1 张是主参考角度，其余图片只是补充角度与细节校正。"
         "必须综合全部参考图保持同一主体身份、结构和版本关系，但最终构图要优先服从多数参考共同指向的主角度。"
-        "少数侧边态、边缘角度或局部细节图只能用来补足结构细节，不能反过来把最终封面主构图改成侧视图。"
+        "少数侧边态、边缘角度或局部细节图用于补足结构细节，最终封面主构图延续多数参考共同指向的主视角。"
         "如果大多数参考图展示的是更完整的正面、三分之四正面或展开英雄角度，就必须延续这种主视角。"
     )
 
@@ -4951,9 +5260,9 @@ def _build_cover_matrix_layout_prompt(layout_constraints: dict[str, Any] | None)
         return ""
     lines: list[str] = []
     if str(constraints.get("title_density") or "").strip() == "compact_upper_stack":
-        lines.append("标题堆叠必须更紧凑地上收，品牌行、主标题、副标题和吸睛文案尽量压缩在上半区，不要把副标题和 badge 压到画面中部。")
+        lines.append("标题堆叠更紧凑地上收，品牌行、主标题、副标题和吸睛文案集中在上半区。")
     if str(constraints.get("subject_clearance_zone") or "").strip() == "middle_center":
-        lines.append("画面中部要保留主主体展示通道，不要让标题条、badge 或特效横切关键结构。")
+        lines.append("画面中部保留主主体展示通道，标题条、badge 和特效避开关键结构。")
     return "".join(lines)
 
 
@@ -4983,7 +5292,7 @@ def _cover_matrix_group_profile(group_key: str) -> dict[str, Any]:
             "representative_platform": "xiaohongshu",
             "cover_size": (1080, 1440),
             "members": ["xiaohongshu", "douyin", "kuaishou", "wechat_channels"],
-            "visual_instruction": "3:4 竖版母版，强调质感与主体完整展示，上半区适合品牌与主标题，下半区保留产品和手持关系，不要挤压主体。",
+            "visual_instruction": "3:4 竖版母版，强调质感与主体完整展示，上半区适合品牌与主标题，下半区保留产品和手持关系，主体空间保持舒展。",
             "layout_constraints": {
                 "title_density": "compact_upper_stack",
                 "subject_clearance_zone": "middle_center",
@@ -5085,25 +5394,25 @@ def _serialize_cover_matrix(cache: dict[str, dict[str, Any]]) -> dict[str, Any]:
             "blocking_reasons": [str(item).strip() for item in (node.get("blocking_reasons") or []) if str(item).strip()],
             "cover_quality": dict(node.get("cover_quality") or {}) if isinstance(node.get("cover_quality"), dict) else {},
             "cover_hard_contract": dict(node.get("cover_hard_contract") or {}) if isinstance(node.get("cover_hard_contract"), dict) else {},
-            "bitmap_title_contract": _serialize_cover_bitmap_title_contract(node),
+            "legacy_bitmap_title_proof": _serialize_cover_legacy_bitmap_title_proof(node),
             "members": list(group.get("members") or []),
             "generation_timing": _extract_cover_generation_timing_summary(node),
         }
     return matrix
 
 
-def _serialize_cover_bitmap_title_contract(node: dict[str, Any]) -> dict[str, Any]:
+def _serialize_cover_legacy_bitmap_title_proof(node: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(node, dict):
         return {}
     payload: dict[str, Any] = {}
     for key in (
-        "bitmap_title_contract_passed",
+        "legacy_bitmap_title_proof_passed",
         "bitmap_title_main_title_matches",
         "bitmap_title_subtitle_matches",
         "bitmap_title_style_verified",
-        "bitmap_title_contract_reason",
-        "bitmap_title_contract_verified_at",
-        "bitmap_title_contract_check_unavailable",
+        "legacy_bitmap_title_proof_reason",
+        "legacy_bitmap_title_proof_verified_at",
+        "legacy_bitmap_title_proof_check_unavailable",
     ):
         if key in node:
             payload[key] = node.get(key)
@@ -5248,21 +5557,30 @@ def _materialize_platform_cover_from_group(
     target_width, target_height = int(platform_rules["cover_size"][0]), int(platform_rules["cover_size"][1])
     blocking_reasons = list(group_metadata.get("blocking_reasons") or [])
     warnings = list(group_metadata.get("warnings") or [])
-    if group_output_path.exists() and bool(group_metadata.get("publish_ready")):
+    source_group_path = (
+        _resolve_final_title_cover_path(material_dir=output_path.parent)
+        or _resolve_cover_matrix_root_cover_path(
+            material_dir=output_path.parent,
+            group_key=str(cover_group.get("key") or "").strip(),
+            group_cover_path=group_output_path,
+        )
+        or group_output_path
+    )
+    if source_group_path.exists() and bool(group_metadata.get("publish_ready")):
         fit_mode = _resolve_cover_canvas_fit_mode(
-            source_path=group_output_path,
+            source_path=source_group_path,
             width=target_width,
             height=target_height,
         )
         _fit_image_to_canvas(
-            source_path=group_output_path,
+            source_path=source_group_path,
             output_path=output_path,
             width=target_width,
             height=target_height,
             fit_mode=fit_mode,
         )
         blocking_reasons = []
-    elif group_output_path.exists():
+    elif source_group_path.exists():
         output_path.unlink(missing_ok=True)
     elif not blocking_reasons:
         blocking_reasons.append("通用封面尚未生成完成")
@@ -5346,10 +5664,10 @@ def _collect_platform_material_blocking_reasons(material: dict[str, Any]) -> lis
     generation_status = str(image_generation.get("status") or "").strip().lower()
     cover_source = _effective_cover_generation_source(cover_generation)
     if cover_source == "reference_cover_fallback":
-        problems.append("封面禁止使用参考帧 fallback，必须完成高质量生图")
+        problems.append("封面要求完成高质量 Codex 生图")
         cover_generation["publish_ready"] = False
         existing_reasons = [str(item).strip() for item in (cover_generation.get("blocking_reasons") or []) if str(item).strip()]
-        fallback_reason = "封面禁止使用参考帧 fallback，必须完成高质量生图"
+        fallback_reason = "封面要求完成高质量 Codex 生图"
         if fallback_reason not in existing_reasons:
             cover_generation["blocking_reasons"] = [*existing_reasons, fallback_reason]
     if generation_status in {"pending", "pending_codex_imagegen", "queued", "running", "in_progress"}:
@@ -5363,7 +5681,7 @@ def _collect_platform_material_blocking_reasons(material: dict[str, Any]) -> lis
     if cover_generation and not bool(cover_generation.get("publish_ready", True)):
         problems.extend(str(item).strip() for item in (cover_generation.get("blocking_reasons") or []) if str(item).strip())
     if cover_generation and not cover_generation_publish_ready and not _cover_generation_is_codex_generated(cover_generation):
-        problems.append("封面必须由 Codex 生成，禁止本地合成或非 Codex 后端")
+        problems.append("封面要求由 Codex 生成")
     return sorted(set(reason for reason in problems if reason))
 
 
@@ -5380,10 +5698,10 @@ def _collect_platform_material_generation_blocking_reasons(material: dict[str, A
     cover_source = _effective_cover_generation_source(cover_generation)
     if cover_policy_required:
         if cover_source == "reference_cover_fallback":
-            problems.append("封面禁止使用参考帧 fallback，必须完成高质量生图")
+            problems.append("封面要求完成高质量 Codex 生图")
         cover_generation_publish_ready = bool(cover_generation.get("publish_ready", False))
         if cover_generation and not cover_generation_publish_ready and not _cover_generation_is_codex_generated(cover_generation):
-            problems.append("封面必须由 Codex 生成，禁止本地合成或非 Codex 后端")
+            problems.append("封面要求由 Codex 生成")
         if cover_generation and not bool(cover_generation.get("publish_ready", True)):
             problems.extend(
                 reason
@@ -5415,7 +5733,7 @@ def _is_publish_gate_only_cover_blocking_reason(reason: str) -> bool:
             "封面主标题未稳定锁定",
             "内容签名漂移",
             "最终封面",
-            "不能放行到最终封面",
+            "最终封面待放行",
         )
     )
 
@@ -7160,10 +7478,10 @@ async def _rank_cover_reference_candidates_for_generation(
     )
     prompt = (
         "你正在给 Codex 封面生成挑选同一商品的主参考图顺序。"
-        "这几张图都来自同一个真实商品或同一对比商品组的不同拍摄角度，不是不同商品。"
-        "你的任务不是淘汰到只剩一张，而是先确定谁应该做 1 号主参考，其余图片继续作为补充角度一起保留。"
+        "这几张图都来自同一个真实商品或同一对比商品组的不同拍摄角度。"
+        "你的任务是先确定谁应该做 1 号主参考，其余图片继续作为补充角度一起保留。"
         "如果多数图片展示的是正面、三分之四正面、展开态或更完整的英雄角度，就必须让这类多数主角度排在前面。"
-        "少数侧边态、边缘角度、局部特写、补充细节图只能放后面做结构补充，不能反过来决定最终主构图。"
+        "少数侧边态、边缘角度、局部特写、补充细节图放后面做结构补充，最终主构图由多数主角度决定。"
         "优先：主体完整、主角度清晰、展开态或更利于识别整体结构、版本差异直观、少字幕遮挡。"
         "降级：侧边态、闭合态、局部特写、主体被截断、字幕污染明显、对比关系不直观。"
         f"\n硬约束：{selection_contract}"
@@ -7480,9 +7798,9 @@ async def _reselect_cover_source_from_full_frame_review(
         "你正在做封面底图最终终判。"
         "第 1 张图是编号总览，后面的图片是候选原图，按顺序对应这些编号："
         f"{review_numbers}。"
-        "请不要只看缩略图，要结合后面的原图判断主角度是否完整、是否展开态、主体是否被遮挡、关键结构是否清晰。"
+        "请结合编号总览和后面的原图判断主角度是否完整、是否展开态、主体是否被遮挡、关键结构是否清晰。"
         "优先：主体完整、展开态、结构清晰、少字幕遮挡、适合后续封面包装。"
-        "不要选：闭合态、侧边态、主体被截断、字幕污染明显或主体关系混乱的候选。"
+        "降级：闭合态、侧边态、主体被截断、字幕污染明显或主体关系混乱的候选。"
         f"\n硬约束：{selection_contract}"
         f"\n视频主题参考：{profile_text}"
         "\n输出 JSON："
@@ -7545,7 +7863,7 @@ async def _select_cover_source_shortlist_numbers_from_sheet(
     stage_label = f"分组 {chunk_index}" if chunk_index is not None else "全局候选"
     prompt = (
         "你正在做封面底图粗筛。"
-        "这是一张四宫格或九宫格候选图，请不要只选唯一 1 张，而是保留最值得进入终选的多张候选。"
+        "这是一张四宫格或九宫格候选图，请保留最值得进入终选的多张候选。"
         "优先看主角度完整展示、展开态、结构清晰、少字幕遮挡、适合后续封面包装。"
         f"\n硬约束：{selection_contract}"
         f"\n当前阶段：{stage_label}"
@@ -7671,8 +7989,8 @@ async def _reselect_cover_source_after_hard_contract_violation(
         return None
     correction_prompt = (
         "你刚才的封面终选结果没有通过硬合同，请在同一张终选四宫格或九宫格里重新选。"
-        "这次不要再选：主体不完整、闭合态、侧边态、字幕污染明显、主体关系混乱或关键信息不清的候选。"
-        "必须优先主角度完整、展开态、结构清晰、后续适合做点击封面包装的候选。"
+        "这次优先：主体完整、展开态、主角度清晰、字幕干扰少、主体关系稳定、关键信息清楚的候选。"
+        "必须优先后续适合做点击封面包装的候选。"
         f"\n硬约束：{selection_contract}"
         f"\n当前候选对应原始序号：{finalist_numbers}"
         f"\n视频主题参考：{profile_text}"
@@ -7900,6 +8218,23 @@ def _materialize_cover_reference_fallback(
         return False
 
 
+def _cover_reference_fallback_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}.reference-fallback{output_path.suffix}")
+
+
+def _clear_cover_generation_outputs_for_regenerate(*, output_path: Path, request_path: Path) -> None:
+    for candidate in (
+        output_path,
+        _cover_reference_fallback_path(output_path),
+        request_path,
+    ):
+        try:
+            if candidate.exists():
+                candidate.unlink()
+        except Exception:
+            pass
+
+
 async def _render_platform_cover(
     *,
     output_path: Path,
@@ -7920,8 +8255,9 @@ async def _render_platform_cover(
     cover_quality: dict[str, Any] | None = None
     blocking_reasons: list[str] = []
     request_path = output_path.with_suffix(".codex-imagegen.json")
+    if force_regenerate:
+        _clear_cover_generation_outputs_for_regenerate(output_path=output_path, request_path=request_path)
     expected_title_lines = _build_cover_title_layout_plan(title=title, cover_brief=cover_brief)
-    overlay_cover_style, overlay_title_style = _resolve_overlay_title_style(rules=rules, cover_brief=cover_brief)
     reference_count_hint = max(
         1,
         len([path for path in (reference_image_paths or []) if path is not None]) or (1 if source_image_path is not None else 0),
@@ -7983,7 +8319,7 @@ async def _render_platform_cover(
                 height=target_height,
             ),
         )
-        completed_request_payload = await _ensure_generated_cover_title_contract_ready(
+        completed_request_payload = await _ensure_generated_cover_request_completed(
             request_path=request_path,
             request_payload=completed_request_payload,
             output_path=output_path,
@@ -7994,29 +8330,6 @@ async def _render_platform_cover(
             source_kind="image_generation",
             image_generation=image_generation,
         )
-        if (
-            _cover_request_is_legacy_completed_without_contract(completed_request_payload)
-            and output_path.exists()
-            and not isinstance(cover_brief, dict)
-            and not bool((completed_request_payload or {}).get("post_title_overlay_applied"))
-        ):
-            await _apply_platform_cover_title_overlay(
-                output_path=output_path,
-                title=title,
-                rules=rules,
-                cover_brief=cover_brief,
-                title_lines=expected_title_lines,
-            )
-            completed_request_payload["post_title_overlay_applied"] = True
-            completed_request_payload["post_title_overlay_lines"] = dict(expected_title_lines or {})
-        if isinstance(completed_request_payload, dict):
-            completed_request_payload["post_title_overlay_group_style"] = str(overlay_cover_style or "").strip()
-            completed_request_payload["post_title_overlay_title_style"] = str(overlay_title_style or "").strip()
-            if request_path.exists():
-                try:
-                    request_path.write_text(json.dumps(completed_request_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-                except Exception:
-                    pass
         cover_assessment = assess_cover_publish_readiness(
             image_generation,
             completed_request_payload,
@@ -8081,6 +8394,7 @@ async def _render_platform_cover(
             last_error = ""
             fallback_warning = ""
             fallback_overlay_safe = False
+            fallback_output_path: Path | None = None
             max_attempts = _resolve_intelligent_copy_cover_generation_attempts()
             for attempt in range(1, max_attempts + 1):
                 try:
@@ -8102,9 +8416,10 @@ async def _render_platform_cover(
                 except CodexImageGenerationPending as exc:
                     image_generation = dict(exc.metadata)
                     image_generation["attempts"] = attempt
+                    fallback_output_path = _cover_reference_fallback_path(output_path)
                     fallback_overlay_safe = _materialize_cover_reference_fallback(
                         source_path=base_image,
-                        output_path=output_path,
+                        output_path=fallback_output_path,
                         width=target_width,
                         height=target_height,
                     )
@@ -8115,23 +8430,31 @@ async def _render_platform_cover(
                     last_error = str(exc)
             if source_kind != "image_generation":
                 if last_error:
+                    fallback_output_path = _cover_reference_fallback_path(output_path)
                     fallback_overlay_safe = _materialize_cover_reference_fallback(
                         source_path=base_image,
-                        output_path=output_path,
+                        output_path=fallback_output_path,
                         width=target_width,
                         height=target_height,
                     )
                     fallback_warning = f"封面图像生成失败，已回退使用参考帧封面：{last_error}"
                     source_kind = "reference_cover_fallback"
-                if source_kind != "image_generation" and not output_path.exists():
-                    return {
-                        "source": source_kind,
-                        "platform": str(platform_key or "").strip(),
-                        "target_size": {"width": target_width, "height": target_height},
-                        "publish_ready": False,
-                        "blocking_reasons": blocking_reasons or ["封面图像生成未完成"],
-                        "image_generation": image_generation,
-                    }
+                if output_path.exists():
+                    output_path.unlink(missing_ok=True)
+                pending_reasons = blocking_reasons or ["封面图像生成未完成"]
+                if fallback_warning and "当前仅生成了参考帧占位封面" not in " ".join(pending_reasons):
+                    pending_reasons = [*pending_reasons, "当前仅生成了参考帧占位封面，等待正式封面生成完成"]
+                return {
+                    "source": source_kind,
+                    "platform": str(platform_key or "").strip(),
+                    "target_size": {"width": target_width, "height": target_height},
+                    "publish_ready": False,
+                    "blocking_reasons": pending_reasons,
+                    "warnings": [fallback_warning] if fallback_warning else [],
+                    "image_generation": image_generation,
+                    "fallback_cover_path": str(fallback_output_path) if fallback_output_path else None,
+                    "fallback_overlay_safe": fallback_overlay_safe,
+                }
         if not generated_image.exists() and not output_path.exists():
             return {
                 "source": source_kind,
@@ -8153,11 +8476,6 @@ async def _render_platform_cover(
                     height=target_height,
                 ),
             )
-            pre_overlay_output_path = output_path.with_name(f"{output_path.stem}.pre-overlay{output_path.suffix}")
-            try:
-                shutil.copy2(output_path, pre_overlay_output_path)
-            except Exception:
-                pre_overlay_output_path = None
         elif output_path.exists():
             _fit_existing_image_to_canvas(
                 output_path=output_path,
@@ -8169,13 +8487,6 @@ async def _render_platform_cover(
                     height=target_height,
                 ),
             )
-            pre_overlay_output_path = output_path.with_name(f"{output_path.stem}.pre-overlay{output_path.suffix}")
-            try:
-                shutil.copy2(output_path, pre_overlay_output_path)
-            except Exception:
-                pre_overlay_output_path = None
-        else:
-            pre_overlay_output_path = None
         request_payload_existed = request_path.exists()
         request_payload = _read_cover_request_payload(request_path) if request_payload_existed else {}
         if (
@@ -8198,14 +8509,7 @@ async def _render_platform_cover(
                 width=target_width,
                 height=target_height,
             )
-        if isinstance(request_payload, dict) and pre_overlay_output_path is not None:
-            request_payload["pre_overlay_output_path"] = str(pre_overlay_output_path)
-            if request_path.exists():
-                try:
-                    request_path.write_text(json.dumps(request_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-                except Exception:
-                    pass
-        request_payload = await _ensure_generated_cover_title_contract_ready(
+        request_payload = await _ensure_generated_cover_request_completed(
             request_path=request_path,
             request_payload=request_payload,
             output_path=output_path,
@@ -8217,31 +8521,6 @@ async def _render_platform_cover(
             image_generation=image_generation,
             allow_overlay=(source_kind != "reference_cover_fallback" or fallback_overlay_safe),
         )
-        if (
-            not request_payload_existed
-            and source_kind == "image_generation"
-            and output_path.exists()
-            and not isinstance(cover_brief, dict)
-            and not bool((request_payload or {}).get("post_title_overlay_applied"))
-        ):
-            await _apply_platform_cover_title_overlay(
-                output_path=output_path,
-                title=title,
-                rules=rules,
-                cover_brief=cover_brief,
-                title_lines=expected_title_lines,
-            )
-            if isinstance(request_payload, dict):
-                request_payload["post_title_overlay_applied"] = True
-                request_payload["post_title_overlay_lines"] = dict(expected_title_lines or {})
-        if isinstance(request_payload, dict):
-            request_payload["post_title_overlay_group_style"] = str(overlay_cover_style or "").strip()
-            request_payload["post_title_overlay_title_style"] = str(overlay_title_style or "").strip()
-            if request_path.exists():
-                try:
-                    request_path.write_text(json.dumps(request_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-                except Exception:
-                    pass
         if isinstance(image_generation, dict) and str(image_generation.get("backend") or "") == "codex_builtin":
             cover_assessment = assess_cover_publish_readiness(
                 image_generation,
@@ -8295,47 +8574,6 @@ async def _render_platform_cover(
     }
 
 
-async def _apply_platform_cover_title_overlay(
-    *,
-    output_path: Path,
-    title: str,
-    rules: dict[str, Any],
-    cover_brief: dict[str, Any] | None = None,
-    title_lines: dict[str, str] | None = None,
-) -> None:
-    resolved_title_lines = dict(title_lines or {}) or _build_cover_title_layout_plan(title=title, cover_brief=cover_brief)
-    if not resolved_title_lines or not output_path.exists():
-        return
-    cover_style, title_style = _resolve_overlay_title_style(rules=rules, cover_brief=cover_brief)
-    await _overlay_title_layout(
-        output_path,
-        resolved_title_lines,
-        cover_style,
-        title_style,
-    )
-
-
-def _should_apply_generated_cover_title_overlay(
-    *,
-    source_kind: str,
-    image_generation: dict[str, Any] | None,
-) -> bool:
-    return True
-
-
-def _resolve_overlay_title_style(*, rules: dict[str, Any], cover_brief: dict[str, Any] | None = None) -> tuple[str, str]:
-    brief = cover_brief if isinstance(cover_brief, dict) else {}
-    style_key = _resolve_cover_image_style_key(rules=rules, cover_brief=brief)
-    cover_style = str(style_key or rules.get("cover_style") or "tech_showcase")
-    title_style = str(rules.get("title_style") or "preset_default")
-    if cover_style == OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO:
-        title_style = "account_metal_cyber_stack"
-    if _cover_style_is_children_storybook_parenting(cover_style) or _cover_brief_targets_parenting_animation(brief):
-        cover_style = OFFICIAL_COVER_STYLE_CHILDREN_STORYBOOK_PARENTING
-        title_style = "children_storybook_bubble_stack"
-    return cover_style, title_style
-
-
 def _read_cover_request_payload(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -8366,10 +8604,7 @@ def _invalidate_failed_completed_cover_request(
         request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
-    for candidate in (
-        output_path,
-        output_path.with_name(f"{output_path.stem}.pre-overlay{output_path.suffix}"),
-    ):
+    for candidate in (output_path,):
         try:
             if candidate.exists():
                 candidate.unlink()
@@ -8402,29 +8637,6 @@ def _write_cover_request_payload_snapshot(
     request_path.parent.mkdir(parents=True, exist_ok=True)
     request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
-
-
-def _build_cover_title_overlay_contract(
-    *,
-    title_lines: dict[str, str] | None,
-    cover_style: str,
-    title_style: str,
-) -> dict[str, Any]:
-    normalized_title_lines = {
-        key: str((title_lines or {}).get(key) or "").strip()
-        for key in ("brand", "top", "main", "sub", "bottom", "hook")
-        if str((title_lines or {}).get(key) or "").strip()
-    }
-    return {
-        "cover_style": str(cover_style or "").strip(),
-        "title_style": str(title_style or "").strip(),
-        "title_lines": normalized_title_lines,
-        "style_tokens": _title_style_tokens(
-            str(title_style or "").strip() or "preset_default",
-            title_lines=normalized_title_lines,
-            cover_style=str(cover_style or "").strip(),
-        ),
-    }
 
 
 def _cover_request_matches_current_contract(
@@ -8461,162 +8673,6 @@ def _cover_request_is_legacy_completed_without_contract(request_payload: dict[st
         key in request_payload
         for key in ("prompt", "cover_hard_contract", "cover_director_policy")
     )
-
-
-def _cover_bitmap_title_contract_already_verified(
-    request_payload: dict[str, Any],
-    *,
-    title_lines: dict[str, str] | None,
-) -> bool:
-    if not isinstance(request_payload, dict) or not bool(request_payload.get("bitmap_title_contract_passed")):
-        return False
-    expected = title_lines or {}
-    actual = request_payload.get("bitmap_title_lines") if isinstance(request_payload.get("bitmap_title_lines"), dict) else {}
-    for key in ("brand", "top", "main", "sub", "bottom", "hook"):
-        expected_value = str(expected.get(key) or "").strip()
-        actual_value = str(actual.get(key) or "").strip()
-        if expected_value and actual_value != expected_value:
-            return False
-    return True
-
-
-def _cover_title_overlay_already_applied(
-    request_payload: dict[str, Any],
-    *,
-    title: str,
-    title_lines: dict[str, str] | None,
-    cover_style: str,
-    title_style: str,
-) -> bool:
-    if not isinstance(request_payload, dict):
-        return False
-    if not bool(request_payload.get("post_title_overlay_applied")):
-        return False
-    recorded_title = str(request_payload.get("post_title_overlay_title") or "").strip()
-    if recorded_title and recorded_title != str(title or "").strip():
-        return False
-    recorded_lines = request_payload.get("post_title_overlay_lines") if isinstance(request_payload.get("post_title_overlay_lines"), dict) else {}
-    expected_lines = title_lines or {}
-    for key in ("brand", "top", "main", "sub", "bottom", "hook"):
-        expected = str(expected_lines.get(key) or "").strip()
-        actual = str(recorded_lines.get(key) or "").strip()
-        if expected and expected != actual:
-            return False
-    expected_contract = _build_cover_title_overlay_contract(
-        title_lines=title_lines,
-        cover_style=cover_style,
-        title_style=title_style,
-    )
-    recorded_contract = request_payload.get("post_title_overlay_contract")
-    if isinstance(recorded_contract, dict):
-        return recorded_contract == expected_contract
-    recorded_cover_style = str(request_payload.get("post_title_overlay_group_style") or "").strip()
-    recorded_title_style = str(request_payload.get("post_title_overlay_title_style") or "").strip()
-    if str(cover_style or "").strip() and recorded_cover_style != str(cover_style or "").strip():
-        return False
-    if str(title_style or "").strip() and recorded_title_style != str(title_style or "").strip():
-        return False
-    return False
-
-
-def _mark_cover_title_overlay_applied(
-    request_path: Path,
-    *,
-    title: str,
-    title_lines: dict[str, str] | None,
-    cover_style: str,
-    title_style: str,
-) -> None:
-    payload = _read_cover_request_payload(request_path)
-    if not payload:
-        return
-    payload["post_title_overlay_applied"] = True
-    payload["post_title_overlay_title"] = str(title or "").strip()
-    payload["post_title_overlay_lines"] = dict(title_lines or {})
-    payload["post_title_overlay_group_style"] = str(cover_style or "").strip()
-    payload["post_title_overlay_title_style"] = str(title_style or "").strip()
-    payload["post_title_overlay_contract"] = _build_cover_title_overlay_contract(
-        title_lines=title_lines,
-        cover_style=cover_style,
-        title_style=title_style,
-    )
-    payload["post_title_overlay_applied_at"] = datetime.now().isoformat()
-    try:
-        request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def _mark_cover_bitmap_title_contract_verified(
-    request_path: Path,
-    *,
-    title_lines: dict[str, str] | None,
-    verification: dict[str, Any],
-) -> None:
-    payload = _read_cover_request_payload(request_path)
-    if not payload:
-        return
-    _finalize_cover_request_generation_status(request_path=request_path, payload=payload)
-    payload["bitmap_title_contract_passed"] = bool(verification.get("bitmap_title_contract_passed"))
-    payload["bitmap_title_lines"] = dict(title_lines or {})
-    payload["bitmap_title_detected"] = {
-        "main": str(verification.get("detected_main_title") or "").strip(),
-        "bottom": str(verification.get("detected_subtitle") or "").strip(),
-    }
-    payload["bitmap_title_main_title_matches"] = bool(verification.get("main_title_matches"))
-    payload["bitmap_title_subtitle_matches"] = bool(verification.get("subtitle_matches"))
-    payload["bitmap_title_style_verified"] = bool(verification.get("style_consistent"))
-    payload["bitmap_title_contract_reason"] = str(verification.get("reason") or "").strip()
-    payload["bitmap_title_contract_verified_at"] = datetime.now().isoformat()
-    payload.pop("bitmap_title_contract_check_unavailable", None)
-    payload.pop("bitmap_title_contract_debug", None)
-    try:
-        request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def _mark_cover_unexpected_bitmap_text_verdict(
-    request_path: Path,
-    *,
-    verification: dict[str, Any],
-) -> None:
-    payload = _read_cover_request_payload(request_path)
-    if not payload:
-        return
-    _finalize_cover_request_generation_status(request_path=request_path, payload=payload)
-    payload["bitmap_unexpected_text_detected"] = bool(verification.get("unexpected_bitmap_text_detected"))
-    payload["bitmap_unexpected_text_detected_lines"] = list(verification.get("detected_text") or [])
-    payload["bitmap_unexpected_text_reason"] = str(verification.get("reason") or "").strip()
-    payload["bitmap_unexpected_text_checked_at"] = datetime.now().isoformat()
-    payload.pop("bitmap_unexpected_text_check_unavailable", None)
-    payload.pop("bitmap_unexpected_text_verification_debug", None)
-    try:
-        request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def _mark_cover_unexpected_bitmap_text_verification_unavailable(
-    request_path: Path,
-    *,
-    reason: str,
-    debug_error: str = "",
-) -> None:
-    payload = _read_cover_request_payload(request_path)
-    if not payload:
-        return
-    _finalize_cover_request_generation_status(request_path=request_path, payload=payload)
-    payload["bitmap_unexpected_text_detected"] = None
-    payload["bitmap_unexpected_text_detected_lines"] = []
-    payload["bitmap_unexpected_text_reason"] = str(reason or "").strip()
-    payload["bitmap_unexpected_text_checked_at"] = datetime.now().isoformat()
-    payload["bitmap_unexpected_text_check_unavailable"] = True
-    payload["bitmap_unexpected_text_verification_debug"] = str(debug_error or "").strip()
-    try:
-        request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
 
 
 def _mark_cover_compare_subject_contract_verified(
@@ -8663,31 +8719,6 @@ def _mark_cover_compare_subject_contract_verification_unavailable(
 def _director_policy_prefers_compare_subject_pair(director_policy: dict[str, Any] | None) -> bool:
     return False
 
-
-def _mark_cover_bitmap_title_contract_verification_unavailable(
-    request_path: Path,
-    *,
-    reason: str,
-    debug_error: str = "",
-) -> None:
-    payload = _read_cover_request_payload(request_path)
-    if not payload:
-        return
-    _finalize_cover_request_generation_status(request_path=request_path, payload=payload)
-    payload["bitmap_title_contract_passed"] = None
-    payload["bitmap_title_main_title_matches"] = None
-    payload["bitmap_title_subtitle_matches"] = None
-    payload["bitmap_title_style_verified"] = None
-    payload["bitmap_title_contract_reason"] = str(reason or "").strip()
-    payload["bitmap_title_contract_verified_at"] = datetime.now().isoformat()
-    payload["bitmap_title_contract_check_unavailable"] = True
-    payload["bitmap_title_contract_debug"] = str(debug_error or "").strip()
-    try:
-        request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-
 def _finalize_cover_request_generation_status(*, request_path: Path, payload: dict[str, Any]) -> None:
     if not isinstance(payload, dict):
         return
@@ -8699,7 +8730,6 @@ def _finalize_cover_request_generation_status(*, request_path: Path, payload: di
     if (
         backend == "codex_builtin"
         and not _cover_request_has_generation_completion_evidence(payload)
-        and not bool(payload.get("post_title_overlay_applied"))
     ):
         return
     output_path = _resolve_cover_request_status_output_path(request_path=request_path, payload=payload)
@@ -8722,11 +8752,7 @@ def _finalize_cover_request_generation_status(*, request_path: Path, payload: di
 def _cover_request_has_post_generation_evidence(payload: dict[str, Any] | None) -> bool:
     if not isinstance(payload, dict):
         return False
-    if bool(payload.get("post_title_overlay_applied")):
-        return True
     for field in (
-        "bitmap_title_contract_verified_at",
-        "bitmap_unexpected_text_checked_at",
         "compare_subject_contract_checked_at",
         "completed_at",
         "result_path",
@@ -8811,29 +8837,6 @@ def _map_container_remix_source_path_to_host(raw_path: str) -> Path:
     return Path(text)
 
 
-def _resolve_cover_verification_bitmap_path(
-    *,
-    request_payload: dict[str, Any] | None,
-    output_path: Path,
-) -> Path:
-    payload = request_payload if isinstance(request_payload, dict) else {}
-    typography_owner = str(
-        ((payload.get("cover_director_policy") or {}) if isinstance(payload.get("cover_director_policy"), dict) else {}).get("typography_owner")
-        or ""
-    ).strip().lower()
-    if typography_owner not in {"local_post_overlay", "post_title_overlay"}:
-        return output_path
-    candidate = str(payload.get("pre_overlay_output_path") or "").strip()
-    if candidate:
-        candidate_path = Path(candidate).expanduser()
-        try:
-            if candidate_path.exists():
-                return candidate_path
-        except OSError:
-            pass
-    return output_path
-
-
 async def _run_cover_visual_json_verification(
     *,
     prompt: str,
@@ -8867,37 +8870,6 @@ async def _run_cover_visual_json_verification(
     return {}, last_error
 
 
-async def _verify_generated_cover_has_unexpected_bitmap_text(
-    *,
-    output_path: Path,
-) -> dict[str, Any]:
-    if not output_path.exists():
-        return {}
-    prompt = (
-        "请判断这张视频封面位图里是否已经出现了任何不应该存在的可读文字。"
-        "这里的“不应该存在”包括：标题、品牌字、型号字、配置字、字幕、水印、logo 字牌、口号、海报字效、伪文字。"
-        "只判断当前位图已经画出来的内容，不要假设后期会补字。"
-        "如果画面里有明显可读或半可读的大字/字牌/伪标题，就判定为 unexpected_bitmap_text_detected=true。"
-        "\n输出 JSON："
-        '{"unexpected_bitmap_text_detected":true,"detected_text":["巅峰之作"],"reason":"画面顶部存在额外大字字牌，不属于后期安全区预留"}'
-    )
-    data, error = await _run_cover_visual_json_verification(
-        prompt=prompt,
-        output_path=output_path,
-        max_tokens=220,
-    )
-    if not data:
-        return {}
-    detected_text = data.get("detected_text")
-    if not isinstance(detected_text, list):
-        detected_text = []
-    return {
-        "unexpected_bitmap_text_detected": bool(data.get("unexpected_bitmap_text_detected")),
-        "detected_text": [str(item).strip() for item in detected_text if str(item).strip()],
-        "reason": str(data.get("reason") or "").strip(),
-    }
-
-
 async def _verify_generated_cover_compare_subject_contract(
     *,
     output_path: Path,
@@ -8913,7 +8885,7 @@ async def _verify_generated_cover_compare_subject_contract(
         verification_prompt = (
             "请判断这张封面是否把主要商品主体表达清楚。"
             "这里的主体只指真实主商品本身，不把包装盒、托盘、卡片、贴纸、说明纸、配件、景物和装饰元素算作主体。"
-            "要求：主角度完整、关键结构清楚、不能只剩局部特写，也不能被背景物喧宾夺主。"
+            "要求：主角度完整、关键结构清楚、主体呈现为完整有效视图，背景物保持辅助地位。"
             "如果主体不完整、被严重裁切、被错误弱化成背景，或画面凭空增加误导性的第二主体，就判定 compare_subject_contract_passed=false。"
         )
     prompt = verification_prompt + "\n输出 JSON：" + '{"compare_subject_contract_passed":false,"reason":"竖版构图过近，主主体只剩局部，关键结构不完整"}'
@@ -8932,47 +8904,7 @@ async def _verify_generated_cover_compare_subject_contract(
     }
 
 
-async def _verify_generated_cover_bitmap_title_contract(
-    *,
-    output_path: Path,
-    title_lines: dict[str, str] | None,
-) -> dict[str, Any]:
-    lines = title_lines or {}
-    required_main = str(lines.get("main") or "").strip()
-    required_bottom = str(lines.get("bottom") or "").strip()
-    if not output_path.exists() or (not required_main and not required_bottom):
-        return {}
-    prompt = (
-        "请校验这张视频封面位图里已经直接渲染出来的标题是否满足硬合同。"
-        f"\n要求主标题精确包含：{required_main or '无'}"
-        f"\n要求副标题精确包含：{required_bottom or '无'}"
-        "\n只判断画面里已经出现的位图文字，不要推测后期会再补什么。"
-        "\n如果主标题和副标题都已明确、无明显错字漂移、风格统一，就判通过。"
-        "\n输出 JSON："
-        '{"bitmap_title_contract_passed":true,"main_title_matches":true,"subtitle_matches":true,"style_consistent":true,"detected_main_title":"MAXACE美杜莎4","detected_subtitle":"顶配vs次顶配","reason":"位图内标题完整且稳定"}'
-    )
-    data, error = await _run_cover_visual_json_verification(
-        prompt=prompt,
-        output_path=output_path,
-        max_tokens=220,
-        timeout_sec=30.0,
-        attempts=2,
-    )
-    if not data:
-        return {}
-    return {
-        "bitmap_title_contract_passed": bool(data.get("bitmap_title_contract_passed")),
-        "main_title_matches": bool(data.get("main_title_matches")),
-        "subtitle_matches": bool(data.get("subtitle_matches")),
-        "style_consistent": bool(data.get("style_consistent")),
-        "detected_main_title": str(data.get("detected_main_title") or "").strip(),
-        "detected_subtitle": str(data.get("detected_subtitle") or "").strip(),
-        "reason": str(data.get("reason") or "").strip(),
-        "debug_error": str(error or "").strip(),
-    }
-
-
-async def _ensure_generated_cover_title_contract_ready(
+async def _ensure_generated_cover_request_completed(
     *,
     request_path: Path,
     request_payload: dict[str, Any],
@@ -8986,138 +8918,14 @@ async def _ensure_generated_cover_title_contract_ready(
     allow_overlay: bool = True,
 ) -> dict[str, Any]:
     payload = dict(request_payload or {})
-    overlay_cover_style, overlay_title_style = _resolve_overlay_title_style(rules=rules, cover_brief=cover_brief)
-    backend = str((image_generation or {}).get("backend") or payload.get("backend") or "").strip().lower()
-    typography_owner = str(
-        ((payload.get("cover_director_policy") or {}) if isinstance(payload.get("cover_director_policy"), dict) else {}).get("typography_owner")
-        or ""
-    ).strip().lower()
-    local_overlay_required = typography_owner == "local_post_overlay"
-    full_cover_typography_required = typography_owner in {"codex_full_cover", "bitmap_full_cover", "imagegen_full_cover"}
-    verification_output_path = _resolve_cover_verification_bitmap_path(
-        request_payload=payload,
-        output_path=output_path,
-    )
-    if output_path.exists() and not local_overlay_required and _cover_bitmap_title_contract_already_verified(payload, title_lines=title_lines):
-        return payload
-    if output_path.exists() and isinstance(image_generation, dict):
-        if local_overlay_required:
-            trusted_local_text_check = bool(
-                payload.get("bitmap_unexpected_text_checked_at")
-                and payload.get("bitmap_unexpected_text_detected") is False
-            )
-            unexpected_text_verification = {}
-            if not trusted_local_text_check:
-                unexpected_text_verification = await _verify_generated_cover_has_unexpected_bitmap_text(
-                    output_path=verification_output_path,
-                )
-            if unexpected_text_verification:
-                if request_path.exists():
-                    _mark_cover_unexpected_bitmap_text_verdict(
-                        request_path,
-                        verification=unexpected_text_verification,
-                    )
-                    payload = _read_cover_request_payload(request_path)
-                else:
-                    payload["bitmap_unexpected_text_detected"] = bool(
-                        unexpected_text_verification.get("unexpected_bitmap_text_detected")
-                    )
-                    payload["bitmap_unexpected_text_detected_lines"] = list(
-                        unexpected_text_verification.get("detected_text") or []
-                    )
-                    payload["bitmap_unexpected_text_reason"] = str(
-                        unexpected_text_verification.get("reason") or ""
-                    ).strip()
-                if bool(unexpected_text_verification.get("unexpected_bitmap_text_detected")):
-                    return payload
-            elif not trusted_local_text_check:
-                reason = "unexpected_bitmap_text_verification_unavailable"
-                if request_path.exists():
-                    _mark_cover_unexpected_bitmap_text_verification_unavailable(
-                        request_path,
-                        reason=reason,
-                        debug_error=str(payload.get("bitmap_unexpected_text_verification_debug") or ""),
-                    )
-                    payload = _read_cover_request_payload(request_path)
-                else:
-                    payload["bitmap_unexpected_text_detected"] = None
-                    payload["bitmap_unexpected_text_detected_lines"] = []
-                    payload["bitmap_unexpected_text_reason"] = reason
-                    payload["bitmap_unexpected_text_checked_at"] = datetime.now().isoformat()
-                    payload["bitmap_unexpected_text_check_unavailable"] = True
-                    payload["bitmap_unexpected_text_verification_debug"] = ""
-        if full_cover_typography_required and backend == "codex_builtin":
-            verification = await _verify_generated_cover_bitmap_title_contract(
-                output_path=output_path,
-                title_lines=title_lines,
-            )
-            if verification:
-                if request_path.exists():
-                    _mark_cover_bitmap_title_contract_verified(
-                        request_path,
-                        title_lines=title_lines,
-                        verification=verification,
-                    )
-                    payload = _read_cover_request_payload(request_path)
-                else:
-                    payload["bitmap_title_contract_passed"] = bool(verification.get("bitmap_title_contract_passed"))
-                    payload["bitmap_title_main_title_matches"] = bool(verification.get("main_title_matches"))
-                    payload["bitmap_title_subtitle_matches"] = bool(verification.get("subtitle_matches"))
-                    payload["bitmap_title_style_verified"] = bool(verification.get("style_consistent"))
-                    payload["bitmap_title_contract_reason"] = str(verification.get("reason") or "").strip()
-                    payload["bitmap_title_contract_verified_at"] = datetime.now().isoformat()
-                    if bool(verification.get("bitmap_title_contract_passed")):
-                        payload["bitmap_title_lines"] = dict(title_lines or {})
-                if not bool(verification.get("bitmap_title_contract_passed")):
-                    return payload
-            elif full_cover_typography_required:
-                reason = "bitmap_title_contract_verification_unavailable"
-                if request_path.exists():
-                    _mark_cover_bitmap_title_contract_verification_unavailable(
-                        request_path,
-                        reason=reason,
-                        debug_error=str(payload.get("bitmap_title_contract_debug") or ""),
-                    )
-                    payload = _read_cover_request_payload(request_path)
-                else:
-                    payload["bitmap_title_contract_passed"] = None
-                    payload["bitmap_title_main_title_matches"] = None
-                    payload["bitmap_title_subtitle_matches"] = None
-                    payload["bitmap_title_style_verified"] = None
-                    payload["bitmap_title_contract_reason"] = reason
-                    payload["bitmap_title_contract_verified_at"] = datetime.now().isoformat()
-                    payload["bitmap_title_contract_check_unavailable"] = True
-                    payload["bitmap_title_contract_debug"] = ""
-                return payload
-    if local_overlay_required and allow_overlay and _should_apply_generated_cover_title_overlay(source_kind=source_kind, image_generation=image_generation) and not _cover_title_overlay_already_applied(
-        payload,
-        title=title,
-        title_lines=title_lines,
-        cover_style=overlay_cover_style,
-        title_style=overlay_title_style,
-    ):
-        await _apply_platform_cover_title_overlay(
-            output_path=output_path,
-            title=title,
-            rules=rules,
-            cover_brief=cover_brief,
-            title_lines=title_lines,
-        )
-        if request_path.exists():
-            _mark_cover_title_overlay_applied(
-                request_path,
-                title=title,
-                title_lines=title_lines,
-                cover_style=overlay_cover_style,
-                title_style=overlay_title_style,
-            )
-            return _read_cover_request_payload(request_path)
-        payload["post_title_overlay_applied"] = True
-        payload["post_title_overlay_lines"] = dict(title_lines or {})
-        payload["post_title_overlay_group_style"] = str(overlay_cover_style or "").strip()
-        payload["post_title_overlay_title_style"] = str(overlay_title_style or "").strip()
+    if request_path.exists() and output_path.exists() and isinstance(image_generation, dict):
+        _finalize_cover_request_generation_status(request_path=request_path, payload=payload)
+        try:
+            request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+        return _read_cover_request_payload(request_path)
     return payload
-
 
 def _should_generate_intelligent_copy_cover_image(source_kind: str) -> bool:
     settings = get_settings()
@@ -9152,351 +8960,84 @@ def _build_platform_cover_image_prompt(
         cover_brief=cover_brief,
         reference_count=reference_count,
     )
-    if str(spec.get("typography_owner") or "").strip().lower() == "local_post_overlay":
-        return _build_provider_safe_cover_image_prompt(spec=spec)
-    if backend in {"", "codex", "codex_cli", "codex_imagegen", "codex_builtin"}:
-        return _build_codex_platform_cover_image_prompt(spec=spec)
-    return _build_provider_safe_cover_image_prompt(spec=spec)
+    return _build_codex_platform_cover_image_prompt(spec=spec)
 
 
 def _build_codex_platform_cover_image_prompt(*, spec: dict[str, Any]) -> str:
-    style_prompt = str(spec["style_prompt"] or "").strip()
-    subject_identity = str(spec["product_identity"] or "").strip() or "参考图中的同一商品"
     style_key = str(spec.get("style_key") or "").strip()
     is_parenting_cover = _cover_style_is_children_storybook_parenting(style_key) or _cover_brief_targets_parenting_animation(spec)
-    if is_parenting_cover and subject_identity in {"", "参考图中的同一商品"}:
-        subject_identity = "参考图中的同一动画角色和亲子场景"
-    selling_angle = str(spec.get("selling_angle") or "").strip()
-    visual_brief = str(spec.get("visual_brief") or "").strip()
-    video_type = str(spec.get("video_type") or "").strip()
-    background_strategy_prompt = _background_strategy_prompt(spec.get("background_strategy") or "")
-    critical_detail_notes = list(spec.get("critical_detail_notes") or [])
-    hard_contract = spec.get("hard_contract") if isinstance(spec.get("hard_contract"), dict) else {}
-    critical_detail_prompt = ""
-    if critical_detail_notes:
-        critical_detail_prompt = "关键细节硬约束：" + "；".join(critical_detail_notes)
-    subject_fidelity_scheme = (
-        spec.get("director_policy", {}).get("subject_fidelity_scheme")
-        if isinstance(spec.get("director_policy"), dict)
-        else {}
-    )
-    subject_fidelity_constraints = list(
-        (
-            subject_fidelity_scheme.get("generic_constraints")
-            if isinstance(subject_fidelity_scheme, dict)
-            else []
-        )
-        or []
-    )
-    subject_fidelity_constraints_prompt = ""
-    if subject_fidelity_constraints:
-        subject_fidelity_constraints_prompt = "主体保真通用约束：" + "；".join(
-            str(item or "").strip() for item in subject_fidelity_constraints if str(item or "").strip()
-        )
-    subject_edit_budget_prompt = str(
-        subject_fidelity_scheme.get("edit_budget_prompt")
-        if isinstance(subject_fidelity_scheme, dict)
-        else ""
-    ).strip() or (
-        "主体编辑预算必须极小：只允许做清晰度、柔和光影、绘本质感、贴纸气泡和背景氛围增强；"
-        "不允许重设计角色外形、角色数量、表情关系、亲子互动关系或原片场景关系。"
-        if is_parenting_cover
-        else (
-            "主体编辑预算必须极小：只允许做清晰度、光影、材质质感和背景氛围增强；"
-            "不允许重设计主体几何、主要部件数量、相对位置、表面分区、状态映射或版本对应关系。"
-        )
-    )
-    packaging_text_exclusion_instruction = (
-        "如果参考图里包含原片字幕、平台水印、角标 logo 或任何非标题可读文字，"
-        "这些都不能原样保留在最终封面里；可以裁掉、弱化、虚化，或替换成无字场景纹理。"
-        if is_parenting_cover
-        else (
-            "如果参考图里包含包装盒、卡片、贴纸、说明纸、印刷 logo 或任何可读包装字样，"
-            "这些都不能原样保留在底图里，也不能原样保留在最终封面里；可以裁掉、弱化、虚化，或替换成纯环境材质与无字纹理。"
-        )
-    )
-    required_title_lines = hard_contract.get("required_title_lines") if isinstance(hard_contract.get("required_title_lines"), dict) else {}
-    brand_line = str(required_title_lines.get("brand") or required_title_lines.get("top") or "").strip()
-    main_title_line = str(required_title_lines.get("main") or "").strip()
-    subtitle_line = str(required_title_lines.get("sub") or required_title_lines.get("bottom") or "").strip()
-    if not subtitle_line:
-        for candidate in (selling_angle, video_type):
-            normalized = _normalize_cover_subtitle_line(candidate)
-            if normalized and normalized not in {brand_line, main_title_line}:
-                subtitle_line = normalized
-                break
-    hook_line = str(required_title_lines.get("hook") or "").strip()
-    active_title_layers = [
-        ("品牌行", brand_line),
-        ("主标题", main_title_line),
-        ("副标题", subtitle_line),
-        ("吸睛文案", hook_line),
-    ]
-    active_title_layers = [(label, text) for label, text in active_title_layers if text]
-    active_title_layer_count = len(active_title_layers)
-    director_policy = spec.get("director_policy") if isinstance(spec.get("director_policy"), dict) else {}
-    compare_subject_pair_preferred = _director_policy_prefers_compare_subject_pair(director_policy)
-    knife_subject = _cover_prompt_targets_knife_subject(spec)
-    if is_parenting_cover:
-        subject_structure_label = "角色外形、角色数量、表情、亲子互动关系和原片场景关系"
-        subject_overlap_label = "角色脸部、表情、身体动作或亲子互动关系"
-        foreground_subject_label = "动画角色、表情、动作、亲子互动关系和场景前景"
-    else:
-        subject_structure_label = "刀型、结构、开合状态" if knife_subject else "主体结构、主要部件布局、展示状态"
-        subject_overlap_label = "刀柄、刀身主体或关键对比关系" if knife_subject else "主体关键结构、主体识别区域或关键对比关系"
-        foreground_subject_label = "刀身、手部、相对位置和前景轮廓" if knife_subject else "主体、手持/摆放关系、相对位置和前景轮廓"
-    hard_contract_prompt = (
-        "硬合同：必须保持参考图动画角色和场景关系一致，"
-        f"不允许改{subject_structure_label}；"
-        "必须直接产出完整可发布封面位图，不允许把标题留给后期再补；"
-        f"同一封面组必须保持统一风格化，统一风格 key={hard_contract.get('unified_style_key') or spec.get('style_key') or ''}。"
-        if is_parenting_cover
-        else (
-            "硬合同：必须保持参考图产品主体一致，"
-            f"不允许改{subject_structure_label}或主角度；"
-            "必须直接产出完整可发布封面位图，不允许把标题留给后期再补；"
-            f"同一封面组必须保持统一风格化，统一风格 key={hard_contract.get('unified_style_key') or spec.get('style_key') or ''}。"
-        )
-    )
-    title_zone_prompt = (
-        "标题区和主体区必须明显分离：上半区用于品牌行、主标题行、副标题行和吸睛文案行，"
-        f"下半区或左右下方保留主体展示，不要让标题压到{subject_overlap_label}。"
-    )
-    canvas_size = spec.get("canvas_size") if isinstance(spec.get("canvas_size"), dict) else {}
-    canvas_width = int(canvas_size.get("width") or 0)
-    canvas_height = int(canvas_size.get("height") or 0)
-    portrait_compare_instruction = ""
-    if compare_subject_pair_preferred and canvas_height > canvas_width:
-        content_scheme = director_policy.get("content_scheme") if isinstance(director_policy.get("content_scheme"), dict) else {}
-        portrait_compare_instruction = str(
-            content_scheme.get("portrait_compare_instruction") if isinstance(content_scheme, dict) else ""
-        ).strip()
-        if not portrait_compare_instruction:
-            portrait_compare_instruction = (
-                "即使标题里在讲版本差异，封面也不要凭空扩展成双主体设定。"
-                "优先把真实主主体放大、看清主要轮廓和关键结构，四周保留适度安全边距。"
-                "不要为了制造对比感硬塞第二个主体，也不要做近距离怼脸式裁切。"
-            )
-    matrix_scheme = (
-        spec.get("director_policy", {}).get("matrix_scheme")
-        if isinstance(spec.get("director_policy"), dict)
-        else {}
-    )
-    matrix_layout_instruction = _build_cover_matrix_layout_prompt(
-        matrix_scheme.get("layout_constraints") if isinstance(matrix_scheme, dict) else {}
-    )
-    line_split_instruction = ""
-    if active_title_layer_count >= 3:
-        layer_names = "、".join(label for label, _text in active_title_layers)
-        line_split_instruction = (
-            f"标题必须按 {active_title_layer_count} 层信息布局直接完整渲染：{layer_names}。"
-            "主标题必须最大、最有压场感；品牌行独立在上方；"
-            + (
-                "副标题作为第二层信息条；" if subtitle_line else ""
-            )
-            + (
-                "吸睛文案做成短 badge。"
-                if hook_line
-                else "其余辅助信息层级必须明显弱于主标题。"
-            )
-        )
-    elif active_title_layer_count == 2:
-        layer_names = "、".join(label for label, _text in active_title_layers)
-        line_split_instruction = (
-            f"标题必须按 2 层信息布局直接完整渲染：{layer_names}。"
-            "主标题必须最大；另一层作为辅助信息，明显更小，不要重复主标题语义。"
-        )
-    four_layer_contract_instruction = (
-        "标题必须按四层信息布局直接完整渲染：品牌行、主标题行、副标题行、吸睛文案行。"
-        "主标题行必须最大、最有压场感；副标题行明显更小一档，品牌行独立在上方，吸睛文案行作为底部 badge。"
-    )
-    required_text_prompt = (
-        "必须直接在最终位图里完整渲染这些真实文字："
-        + "；".join(f"{label}「{text}」" for label, text in active_title_layers)
-        + "。"
-        if active_title_layers
-        else "如果画面里出现文字，只允许使用提示词里明确要求的标题内容。"
-    )
-    allowed_text_layer_prompt = (
-        "只允许渲染上面明确要求的这些文字层；不要额外添加 slogan、包装字、字幕、功能标签、按钮或任何未要求的字。"
-        if active_title_layers
-        else "不要额外添加 slogan、包装字、字幕、功能标签、按钮或任何未要求的字。"
-    )
-    safe_layout_prompt = (
-        "构图优先做成儿童育儿短视频封面：角色表情和互动关系清楚，标题区在上中部，"
-        "贴纸气泡和绘本边框只做辅助，不遮挡角色脸部和关键动作。"
-        if is_parenting_cover
-        else (
-            "构图优先做成成熟短视频爆款封面：主体聚在下半区或两侧下方，"
-            "上中部留下干净但有能量感的标题舞台；不要再把标题区和主体强行堆在同一个中央区域。"
-        )
-    )
     reference_pack_prompt = _cover_reference_pack_prompt(
         reference_count=int(spec.get("reference_count") or 1),
         style_key=style_key,
     )
-    selling_line = f"封面要表达的卖点：{selling_angle}" if selling_angle else ""
-    visual_line = f"画面重点：{visual_brief}" if visual_brief else ""
-    video_type_line = f"视频题材：{video_type}" if video_type else ""
-    subject_identity_line = (
-        "主体说明：保持参考图中的同一动画角色、角色数量、表情、动作和亲子互动关系，不要改成陌生角色，也不要凭空增加无关角色。"
+    canvas_size = spec.get("canvas_size") if isinstance(spec.get("canvas_size"), dict) else {}
+    detail_notes = "；".join(
+        str(item).strip() for item in (spec.get("critical_detail_notes") or []) if str(item).strip()
+    )
+    subject_line = (
+        "主体：保持参考图中的同一动画角色、角色数量、表情、动作和亲子互动关系。"
         if is_parenting_cover
-        else (
-            "主体说明：保持参考图中的同一商品主体和版本关系，不改变品牌归属、型号类别、材质关系与主角度。"
-            if compare_subject_pair_preferred
-            else "主体说明：保持参考图中的同一商品主体和版本关系，不改变品牌归属、型号类别、材质关系与主角度，也不要凭空增加第二主体。"
+        else "主体：保持参考图中的同一真实商品主体、版本关系、主角度、结构比例和材质关系。"
+    )
+    background_strategy_prompt = _background_strategy_prompt(spec.get("background_strategy") or "")
+    title_lines = spec.get("title_lines") if isinstance(spec.get("title_lines"), dict) else {}
+    title_line_rows = [
+        f"- {label}：{text}"
+        for label, text in (
+            ("品牌行", str(title_lines.get("brand") or title_lines.get("top") or "").strip()),
+            ("主标题", str(title_lines.get("main") or spec.get("title") or "").strip()),
+            ("副标题", str(title_lines.get("subtitle") or title_lines.get("bottom") or "").strip()),
+            ("角标/钩子", str(title_lines.get("hook") or "").strip()),
         )
+        if text
+    ]
+    title_contract_prompt = "\n".join(title_line_rows) if title_line_rows else f"- 主标题：{str(spec.get('title') or '').strip()}"
+    immutable_rows = [
+        f"- {str(item).strip()}"
+        for item in (spec.get("immutable_requirements") or [])
+        if str(item).strip()
+    ]
+    director_policy = spec.get("director_policy") if isinstance(spec.get("director_policy"), dict) else {}
+    creator_style_scheme = (
+        director_policy.get("creator_style_scheme")
+        if isinstance(director_policy.get("creator_style_scheme"), dict)
+        else {}
     )
-    subject_requirement_line = (
-        "要求：主体必须还是参考图里的动画角色和亲子场景；优先让角色表情、情绪关系和家庭互动一眼可读。"
-        "可以增加柔和高亮、贴纸气泡、蜡笔纸纹和圆润标题包装，整体保持温暖、明亮、亲子教育感。"
-        if is_parenting_cover
-        else (
-            "要求：主体必须还是参考图里的真实商品；如果参考图里明确是两件主要对比主体，就保持这两件都清晰完整。"
-            "优先做强点击封面化编排：主体放大、版本差异可读、手持真实、细节锐利。"
-            if compare_subject_pair_preferred
-            else "要求：主体必须还是参考图里的真实商品；优先做强点击封面化编排：主体放大、细节清楚、手持真实、质感锐利，不要把背景物件误生成第二主体。"
-        )
+    edit_budget_prompt = str(creator_style_scheme.get("edit_budget_prompt") or "").strip()
+    if edit_budget_prompt:
+        immutable_rows.append(f"- {edit_budget_prompt}")
+    immutable_rows.extend(
+        f"- {str(item).strip()}"
+        for item in (creator_style_scheme.get("generic_constraints") or [])
+        if str(item).strip()
     )
-    atmosphere_instruction = (
-        "背景特效必须是温暖儿童绘本风、柔和阳光、贴纸气泡和亲子教育提示感，整体轻快、明亮、适合家长和儿童内容。"
-        if is_parenting_cover
-        else "背景特效必须保留高能电光、金属质感、火焰能量和赛博发光史诗氛围，不要弱化成普通干净背景。"
-    )
+    immutable_prompt = "\n".join(immutable_rows)
     return (
-        "基于参考图生成一张可直接发布的完整视频封面。\n"
-        f"平台：{spec['platform_label']}\n"
-        f"视觉方向：{spec['visual_instruction']}\n"
-        f"{video_type_line}\n"
+        "使用 Codex 内置 image_gen/edit 基于参考图一次性生成最终可发布视频封面。\n"
+        f"平台：{spec.get('platform_label') or ''}\n"
+        f"目标比例：{canvas_size.get('width')}x{canvas_size.get('height')}\n"
+        "标题文案合同：按以下文字直接渲染在最终位图里，作为成图组成部分。\n"
+        f"{title_contract_prompt}\n"
+        "标题排版要求：大字、清晰、高对比、适合缩略图阅读；使用描边、投影、色块、贴纸和角标增强可读性，并避开主体关键结构。\n"
+        f"视觉方向：{spec.get('visual_instruction') or ''}\n"
+        f"视频题材：{spec.get('video_type') or ''}\n"
+        f"卖点：{spec.get('selling_angle') or ''}\n"
+        f"画面重点：{spec.get('visual_brief') or ''}\n"
         f"{reference_pack_prompt}\n"
-        f"{subject_identity_line}\n"
-        f"{selling_line}\n"
-        f"{visual_line}\n"
-        f"{subject_fidelity_constraints_prompt}\n"
-        f"{critical_detail_prompt}\n"
-        f"{hard_contract_prompt}\n"
-        f"{packaging_text_exclusion_instruction}\n"
+        f"{subject_line}\n"
+        f"关键细节：{detail_notes}\n"
+        f"主体保真通用约束：\n{immutable_prompt}\n"
         f"{background_strategy_prompt}\n"
-        f"{style_prompt}\n"
-        f"{title_zone_prompt}\n"
-        f"{safe_layout_prompt}\n"
-        f"{required_text_prompt}\n"
-        "编辑策略：前景主体结构保留优先。优先保留参考图里已有的"
-        f"{foreground_subject_label}，"
-        "重点改背景、光影、氛围特效和标题排版，不要重新设计主体几何结构。\n"
-        f"{subject_edit_budget_prompt}\n"
-        f"{subject_requirement_line}"
-        f"{portrait_compare_instruction}"
-        f"{matrix_layout_instruction}"
-        "标题必须按品牌行、主标题行、副标题行、吸睛文案行的固定信息层级规划；缺失的行可以不画，但剩余层级不能互相挤压。"
-        f"{line_split_instruction}"
-        f"{four_layer_contract_instruction}"
-        "只允许渲染上面明确要求的品牌行、主标题、副标题和吸睛文案；"
-        f"{allowed_text_layer_prompt}"
-        "标题字效必须直接在位图里完成，不要留空白牌位等后期占位方案。"
-        f"{atmosphere_instruction}"
-        "标题舞台必须集中在上中部，主体展示集中在下半区或左右下方，适配常见平台居中裁切。\n"
-        "禁止：任何未要求的可读文字、字幕、水印、伪 logo、乱码、错别字、改变主体身份。"
+        f"{spec.get('style_prompt') or ''}\n"
+        "封面级增强集中在构图、光影、质感、清晰度和背景氛围；主体几何、型号、数量、相对位置和开合状态保持参考关系。\n"
+        "画面文字范围：只渲染标题文案合同内文字；其余位置保持干净的背景、材质或装饰元素。\n"
+        "参考图里的包装字、字幕、平台水印或可读标识融合为背景材质；标题文案合同里的文字保持清晰可读。\n"
+        "输出为已经集成标题文案的最终封面位图。"
     )
 
 
 def _build_provider_safe_cover_image_prompt(*, spec: dict[str, Any]) -> str:
-    brief_text = "\n".join(spec["brief_lines"])
-    immutable_text = "\n".join(spec["immutable_requirements"])
-    background_strategy_prompt = _background_strategy_prompt(spec.get("background_strategy") or "")
-    style_key = str(spec.get("style_key") or "").strip()
-    is_parenting_cover = _cover_style_is_children_storybook_parenting(style_key) or _cover_brief_targets_parenting_animation(spec)
-    reference_pack_prompt = _cover_reference_pack_prompt(
-        reference_count=int(spec.get("reference_count") or 1),
-        style_key=style_key,
-    )
-    critical_detail_notes = list(spec.get("critical_detail_notes") or [])
-    hard_contract = spec.get("hard_contract") if isinstance(spec.get("hard_contract"), dict) else {}
-    critical_detail_prompt = ""
-    if critical_detail_notes:
-        critical_detail_prompt = "关键细节硬约束：\n" + "\n".join(f"- {note}" for note in critical_detail_notes)
-    subject_fidelity_scheme = (
-        spec.get("director_policy", {}).get("subject_fidelity_scheme")
-        if isinstance(spec.get("director_policy"), dict)
-        else {}
-    )
-    subject_fidelity_constraints = list(
-        (
-            subject_fidelity_scheme.get("generic_constraints")
-            if isinstance(subject_fidelity_scheme, dict)
-            else []
-        )
-        or []
-    )
-    subject_fidelity_constraints_prompt = ""
-    if subject_fidelity_constraints:
-        subject_fidelity_constraints_prompt = "主体保真通用约束：\n" + "\n".join(
-            f"- {str(item or '').strip()}" for item in subject_fidelity_constraints if str(item or "").strip()
-        )
-    compare_subject_pair_preferred = _director_policy_prefers_compare_subject_pair(
-        spec.get("director_policy") if isinstance(spec.get("director_policy"), dict) else {}
-    )
-    knife_subject = _cover_prompt_targets_knife_subject(spec)
-    if is_parenting_cover:
-        subject_structure_label = "角色外形、角色数量、表情、动作和亲子互动关系"
-        foreground_subject_label = "动画角色、表情、动作、亲子互动关系和场景前景"
-    else:
-        subject_structure_label = "刀型、结构、开合状态" if knife_subject else "主体结构、主要部件布局、展示状态"
-        foreground_subject_label = "刀身、手持关系和前景轮廓" if knife_subject else "主体结构、摆放/手持关系和前景轮廓"
-    hard_contract_prompt = (
-        "硬合同：\n"
-        + (
-            f"- 必须保持参考图动画角色和场景关系一致，不允许改{subject_structure_label}。\n"
-            if is_parenting_cover
-            else f"- 必须保持参考图产品主体一致，不允许改{subject_structure_label}或主角度。\n"
-        )
-        + "- 标题由后期统一叠加；必须为后期统一叠加品牌/型号主标题和配置副标题预留清晰标题安全区，但底图里不能直接画任何标题字。\n"
-        f"- 同一封面组必须统一风格化，统一风格 key={hard_contract.get('unified_style_key') or spec.get('style_key') or ''}。"
-    )
-    packaging_text_exclusion_instruction = (
-        "原片字幕、平台水印、角标 logo 或任何非标题可读文字都不能原样保留在底图里；"
-        "如果参考图里有这些元素，必须裁掉、弱化、虚化，或替换成无字场景纹理。"
-        if is_parenting_cover
-        else (
-            "包装盒、卡片、贴纸、说明纸、印刷 logo 或任何可读包装字样都不能原样保留在底图里；"
-            "如果参考图里有这些元素，必须裁掉、弱化、虚化，或替换成无字环境纹理。"
-        )
-    )
-    no_text_bitmap_instruction = (
-        "不要在图中生成任何文字。"
-        "底图里禁止出现任何可读或半可读的中文、英文、数字、logo 字牌、字幕、水印、海报字效或伪文字；"
-        "如果参考帧里原本有字样，只保留无字的场景关系，不要让任何字母数字保持可读。"
-        if is_parenting_cover
-        else (
-            "不要在图中生成任何文字。"
-            "底图里禁止出现任何可读或半可读的中文、英文、数字、logo 字牌、产品本体铭文、品牌章、字幕、水印、海报字效或伪文字；"
-            "如果产品本体或包装上原本有品牌字样，只保留对应位置的材质/刻印关系，不要让任何字母数字保持可读。"
-        )
-    )
-    return (
-        "基于参考图生成封面底图。\n"
-        f"封面主题：{spec['title']}\n"
-        f"画面方向：{spec['visual_instruction']}\n"
-        f"{reference_pack_prompt}\n"
-        f"{brief_text}\n"
-        f"{subject_fidelity_constraints_prompt}\n"
-        f"{critical_detail_prompt}\n"
-        f"{hard_contract_prompt}\n"
-        f"{packaging_text_exclusion_instruction}\n"
-        f"{no_text_bitmap_instruction}\n"
-        + (
-            f"角色/场景身份必须通过角色外形、表情、动作和亲子互动关系稳定表达：{spec['product_identity']}\n"
-            if is_parenting_cover
-            else f"品牌/商品身份必须通过外形、结构、材质关系和{'版本差异' if compare_subject_pair_preferred else '主体细节'}稳定表达：{spec['product_identity']}\n"
-        )
-        + f"{background_strategy_prompt}\n"
-        f"{spec['style_prompt']}\n"
-        "编辑策略：前景主体结构保留优先，尽量保留参考图里已有的"
-        f"{foreground_subject_label}；"
-        "重点改背景、光影和氛围，不要重画主体几何结构。\n"
-        f"{immutable_text}"
-    )
-
+    return _build_codex_platform_cover_image_prompt(spec=spec)
 
 def _build_platform_cover_prompt_spec(
     *,
@@ -9561,10 +9102,10 @@ def _build_platform_cover_prompt_spec(
     )
     if is_parenting_cover:
         immutable_requirements = [
-            "主体必须是参考图里的同一批动画角色和同一个亲子场景，不要凭空增加无关角色。",
-            "角色一致性是最高优先级：不改角色外形、角色数量、表情关系、动作关系和场景关系。",
+            "主体必须是参考图里的同一批动画角色和同一个亲子场景，角色集合保持一致。",
+            "角色一致性是最高优先级：角色外形、角色数量、表情关系、动作关系和场景关系保持稳定。",
             "优先保留参考图前景角色的原始表情、动作和互动关系；允许增强的是柔和光影、绘本质感、贴纸气泡、标题区域和背景氛围。",
-            "重点强调动画场景一致性：保留角色轮廓、比例、颜色分区、相对位置和情绪表达，不要画成陌生角色。",
+            "重点强调动画场景一致性：保留角色轮廓、比例、颜色分区、相对位置和情绪表达，保持同一角色识别。",
             "在角色和场景不变的前提下，加强构图、清晰度、标题可读性和儿童育儿视频包装感。",
         ]
     else:
@@ -9572,10 +9113,12 @@ def _build_platform_cover_prompt_spec(
             (
                 "主体必须是参考图里的同一个商品；如果内容明确是双版本/双主体对比，就保持这两个主要主体都稳定可辨。"
                 if compare_subject_pair_preferred
-                else "主体必须是参考图里的同一个商品，不要凭空增加第二主体或额外版本。"
+                else "主体必须是参考图里的同一个商品，主体数量和版本关系保持参考一致。"
             ),
             "主体一致性是最高优先级：不改商品身份，不改品牌归属，不改核心结构。",
             "优先保留参考图前景主体的原始结构和相对关系；允许重点增强的是背景、光影、氛围和标题区域。",
+            "保留主体主要轮廓、比例关系、主要部件数量与相对位置，硬件或结构层级保持稳定。",
+            "保留主体表面分区、材质关系和版本差异，不同版本特征保持各自对应关系。",
             "重点强调商品细节一致性：保留轮廓、比例、关键开合关系、纹理分区和主要部件位置，不改款，不变形。",
             (
                 "在主体不变的前提下，加强构图、光影、清晰度、对比和质感，突出版本差异。"
@@ -9583,31 +9126,19 @@ def _build_platform_cover_prompt_spec(
                 else "在主体不变的前提下，加强构图、光影、清晰度、对比和质感，突出真实细节与材质表现。"
             ),
         ]
-    if typography_owner == "local_post_overlay":
-        immutable_requirements.extend(
-            [
-                "底图语义要和封面主题一致，但不能依赖任何可读文字来表达品牌或型号。",
-                "必须预留清晰标题安全区，后期统一叠加品牌行、主标题、副标题和吸睛文案。",
-                (
-                    "底图里不能直接画任何可读或半可读文字；如果参考帧里有原片字幕、平台水印或角标，只保留无字场景关系，不要让字保持可读。"
-                    if is_parenting_cover
-                    else "底图里不能直接画任何可读或半可读文字；如果主体或包装上有品牌刻字、logo 字牌或型号铭文，只保留位置关系和材质质感，不要让字母数字保持可读。"
-                ),
-            ]
-        )
-    else:
-        immutable_requirements.extend(
-            [
-                (
-                    "角色和亲子场景不能丢，底图语义要与育儿主题一致，不能换成抽象符号或陌生角色。"
-                    if is_parenting_cover
-                    else "品牌/商品识别词不能丢，底图语义要与封面主题一致，不能换成泛称。"
-                ),
-                "标题结构必须准确完整：品牌行、主标题、副标题和吸睛文案都要按合同生成。",
-            ]
-        )
+    immutable_requirements.extend(
+        [
+            (
+                "角色和亲子场景保持完整，封面语义与育儿主题一致。"
+                if is_parenting_cover
+                else "商品主体保持完整，封面语义与内容主题一致。"
+            ),
+            "Codex 直接输出已经集成标题文案的最终封面位图。",
+            "标题合同指定的品牌行、主标题、副标题和角标文案是画面唯一可读文案。",
+        ]
+    )
     for note in critical_detail_notes:
-        immutable_requirements.append(f"关键细节不能画错：{note}")
+        immutable_requirements.append(f"关键细节保持正确：{note}")
     hard_contract = _build_cover_hard_contract(
         title=title_text,
         cover_brief=brief,
@@ -9658,34 +9189,24 @@ def _build_cover_hard_contract(
     title_lines: dict[str, str] | None,
     typography_owner: str,
 ) -> dict[str, Any]:
-    identity = str(cover_brief.get("product_identity") or "").strip()
-    selling_angle = str(cover_brief.get("selling_angle") or "").strip()
-    video_type = str(cover_brief.get("video_type") or "").strip()
-    layout = dict(title_lines or {})
-    local_overlay_required = str(typography_owner or "").strip().lower() == "local_post_overlay"
     return {
         "subject_identity_required": True,
         "preserve_subject_geometry": True,
         "preserve_primary_angle_if_present": True,
         "preserve_open_state_if_present": True,
         "compare_subject_pair_required": False,
-        "brand_model_title_required": bool(identity or title),
-        "config_subtitle_required": bool(layout.get("bottom") or selling_angle or video_type),
-        "hook_badge_required": bool(layout.get("hook")),
-        "full_bitmap_cover_required": not local_overlay_required,
-        "post_title_overlay_required": local_overlay_required,
+        "brand_model_title_required": False,
+        "config_subtitle_required": False,
+        "hook_badge_required": False,
+        "full_bitmap_cover_required": True,
+        "legacy_title_proof_required": False,
+        "typography_processing": "codex_integrated_bitmap",
+        "required_text_only": True,
+        "text_scope": "required_title_lines_only",
         "unified_style_key": str(style_key or "").strip(),
         "signature_stability_required": True,
-        "required_title_lines": {
-            "brand": str(layout.get("brand") or layout.get("top") or "").strip(),
-            "top": str(layout.get("top") or "").strip(),
-            "main": str(layout.get("main") or "").strip(),
-            "sub": str(layout.get("sub") or layout.get("bottom") or "").strip(),
-            "bottom": str(layout.get("bottom") or "").strip(),
-            "hook": str(layout.get("hook") or "").strip(),
-        },
+        "required_title_lines": dict(title_lines or {}),
     }
-
 
 def _build_cover_director_policy(
     *,
@@ -9699,104 +9220,44 @@ def _build_cover_director_policy(
     canvas_size: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
     profile = dict(COVER_DIRECTOR_STYLE_PROFILES.get(str(style_key or "").strip()) or {})
-    layout = dict(title_lines or {})
     axes = dict(strategy_axes or {})
     width, height = tuple(canvas_size or (0, 0))
     matrix_key = _resolve_cover_matrix_group_key(width=int(width or 0), height=int(height or 0)) if width and height else ""
     matrix_profile = _cover_matrix_group_profile(matrix_key) if matrix_key else {}
     matrix_scheme = dict(axes.get("matrix_scheme") or {})
-    matrix_scheme.update(
-        {
-            "key": matrix_key,
-            "canvas_size": [int(width), int(height)] if width and height else [],
-            "layout_constraints": dict(matrix_profile.get("layout_constraints") or {}),
-        }
-    )
+    matrix_scheme.update({"key": matrix_key, "canvas_size": [int(width), int(height)] if width and height else [], "layout_constraints": dict(matrix_profile.get("layout_constraints") or {})})
     creator_style_scheme = dict(axes.get("creator_style_scheme") or {})
     creator_style_scheme.setdefault("style_profile_key", str(profile.get("style_profile_key") or "").strip())
-    subject_fidelity_scheme = dict(axes.get("subject_fidelity_scheme") or {})
-    content_scheme = dict(axes.get("content_scheme") or {})
-    effective_style_profile_key = str(creator_style_scheme.get("style_profile_key") or profile.get("style_profile_key") or "").strip()
-    owner = str(typography_owner or "").strip().lower() or "codex_full_cover"
-    local_overlay_required = owner == "local_post_overlay"
     return {
-        "direction_version": "local_overlay_required_v1" if local_overlay_required else "full_cover_codex_v1",
-        "codex_role": "render_cover_base_for_local_overlay" if local_overlay_required else "render_final_cover_with_integrated_typography",
-        "goal": (
-            "Let the image backend produce a clean cover base that is safe for local title overlay."
-            if local_overlay_required
-            else "Let Codex image generation produce the final publishable cover with integrated typography and unified style."
-        ),
-        "typography_owner": owner,
+        "direction_version": "full_cover_codex_v1",
+        "codex_role": "render_final_cover_with_integrated_typography",
+        "goal": "Let Codex image generation produce the final text-integrated publishable cover bitmap in one pass.",
+        "typography_owner": str(typography_owner or "codex_full_cover").strip() or "codex_full_cover",
         "platform_label": str(platform_label or "").strip(),
         "visual_instruction": str(visual_instruction or "").strip(),
         "style_key": str(style_key or "").strip(),
-        "style_profile_key": effective_style_profile_key,
+        "style_profile_key": str(creator_style_scheme.get("style_profile_key") or profile.get("style_profile_key") or "").strip(),
         "base_style_profile_key": str(profile.get("style_profile_key") or "").strip(),
-        "headline_effects": list(profile.get("headline_effects") or []),
-        "layout_contract": list(profile.get("layout_contract") or ["brand_line", "main_title", "subtitle", "hook_badge"]),
+        "headline_effects": ["title_typography", "high_contrast_outline", "thumbnail_readability"],
+        "layout_contract": ["subject_fidelity", "platform_composition", "required_title_text", "clean_text_scope", "single_pass_codex_generation"],
         "composition_contract": dict(profile.get("composition_contract") or {}),
         "matrix_scheme": matrix_scheme,
-        "content_scheme": content_scheme,
+        "content_scheme": dict(axes.get("content_scheme") or {}),
         "creator_style_scheme": creator_style_scheme,
-        "subject_fidelity_scheme": subject_fidelity_scheme,
-        "required_title_lines": {
-            "brand": str(layout.get("brand") or layout.get("top") or "").strip(),
-            "main": str(layout.get("main") or "").strip(),
-            "subtitle": str(layout.get("sub") or layout.get("bottom") or "").strip(),
-            "hook": str(layout.get("hook") or "").strip(),
-        },
-        "forbidden_extra_visual_text": [
-            "subtitles",
-            "watermarks",
-            "pseudo logos unrelated to the requested brand",
-            "Chinese or English words not explicitly requested in the prompt contract",
-        ],
-        "completion_requires": [
-            *(
-                [
-                    "A real bitmap generated by the selected image backend.",
-                    "The bitmap is a clean cover base for local typography overlay, not the final text-integrated cover.",
-                    "No extra unrequested typography, subtitles, watermarks, or unrelated pseudo logos appear in the bitmap.",
-                    "Key subject stays complete and readable after later typography placement.",
-                    "The generated bitmap copied to output_path before marking this request completed.",
-                ]
-                if local_overlay_required
-                else [
-                    "A real bitmap generated with Codex built-in image_gen/edit mode.",
-                    "The bitmap is the final cover, not a text-free base image.",
-                    "The bitmap already contains the requested brand line, main title, subtitle, and hook badge in a unified style.",
-                    "No extra unrequested typography, subtitles, watermarks, or unrelated pseudo logos appear in the bitmap.",
-                    "Key subject stays complete and readable after typography placement.",
-                    "The generated bitmap copied to output_path before marking this request completed.",
-                ]
-            ),
-        ],
+        "subject_fidelity_scheme": dict(axes.get("subject_fidelity_scheme") or {}),
+        "required_title_lines": dict(title_lines or {}),
+        "allowed_visual_text": ["required_title_lines"],
+        "clean_visual_text_scope": ["subtitles_absent", "watermarks_absent", "unrelated_pseudo_logos_absent", "unrelated_readable_text_absent"],
+        "completion_requires": ["A real bitmap generated with Codex built-in image_gen/edit mode.", "The bitmap is the final text-integrated cover.", "Required title typography from required_title_lines is integrated into the bitmap.", "The visual text scope is limited to required_title_lines.", "Unrelated readable visual text is absent.", "Key subject stays complete and readable in the final composition.", "The generated bitmap copied to output_path before marking this request completed."],
         "supports_compare_subject_pair": False,
     }
 
-
 def _resolve_active_cover_image_backend() -> str:
-    settings = get_settings()
-    backend = str(getattr(settings, "intelligent_copy_cover_image_backend", "") or "codex_builtin").strip().lower()
-    if backend in {"", "codex", "codex_cli", "codex_imagegen"}:
-        return "codex_builtin"
-    if backend == "openai_api":
-        return "openai_images_api"
-    if backend in {"minimax", "minimax_api"}:
-        return "minimax_images_api"
-    if backend in {"dreamina", "dreamina_cdp", "dreamina_web_cdp"}:
-        return "dreamina_web"
-    if backend in {"openai_images_api", "minimax_images_api", "dreamina_web"}:
-        return backend
     return "codex_builtin"
 
 
 def _resolve_cover_typography_owner_for_backend(backend: str) -> str:
-    if str(os.getenv("ROUGHCUT_COVER_FULL_BITMAP_TYPOGRAPHY", "") or "").strip().lower() in {"1", "true", "yes"}:
-        return "codex_full_cover" if str(backend or "").strip().lower() == "codex_builtin" else "local_post_overlay"
-    return "local_post_overlay"
-
+    return "codex_full_cover"
 
 def _cover_prompt_targets_knife_subject(spec: dict[str, Any] | None) -> bool:
     payload = spec if isinstance(spec, dict) else {}
@@ -10086,14 +9547,26 @@ def _build_cover_title_layout_plan(
     title: str,
     cover_brief: dict[str, Any] | None = None,
 ) -> dict[str, str] | None:
-    base_lines = _build_cover_title_lines(title) or {"top": "", "main": "", "bottom": ""}
     brief = cover_brief if isinstance(cover_brief, dict) else {}
     identity = str(brief.get("product_identity") or "").strip()
     selling_angle = str(brief.get("selling_angle") or "").strip()
     video_type = str(brief.get("video_type") or "").strip()
+    visual_brief = str(brief.get("visual_brief") or "").strip()
+    critical_detail_notes = [
+        str(item or "").strip()
+        for item in (brief.get("critical_detail_notes") or [])
+        if str(item or "").strip()
+    ] if isinstance(brief.get("critical_detail_notes"), (list, tuple, set)) else []
+    trusted_context = [identity, selling_angle, video_type, visual_brief, *critical_detail_notes]
+    title = _apply_cover_trusted_term_overrides(title, trusted_context)
+    identity = _apply_cover_trusted_term_overrides(identity, trusted_context)
+    selling_angle = _apply_cover_trusted_term_overrides(selling_angle, trusted_context)
+    video_type = _apply_cover_trusted_term_overrides(video_type, trusted_context)
+    base_lines = _build_cover_title_lines(title) or {"top": "", "main": "", "bottom": ""}
     identity_lines = _build_cover_title_lines(identity) or {}
     identity_brand, identity_model = _split_cover_identity_lines(identity)
     identity_model = _strip_cover_compare_suffix(identity_model)
+    trusted_terms = _extract_cover_trusted_title_terms(" ".join(trusted_context))
 
     top = str(base_lines.get("top") or identity_brand or identity_lines.get("top") or "").strip()
     if identity_brand and top != identity_brand:
@@ -10101,6 +9574,15 @@ def _build_cover_title_layout_plan(
     main = str(base_lines.get("main") or "").strip()
     if identity_model and (not main or _cover_title_line_contains_compare_tail(main)):
         main = identity_model
+    for trusted_term in trusted_terms:
+        if not trusted_term or trusted_term in main:
+            continue
+        if identity_model and trusted_term in identity_model:
+            main = identity_model
+            break
+        if trusted_term in title and _display_units(title) <= 18:
+            main = title
+            break
     if not main:
         main = str(identity_lines.get("main") or identity_lines.get("top") or "").strip()
     bottom = str(base_lines.get("bottom") or "").strip()

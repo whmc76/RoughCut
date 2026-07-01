@@ -5,7 +5,6 @@ import { Link } from "react-router-dom";
 import { api } from "../../api";
 import { apiPath } from "../../api/core";
 import {
-  openManualHandoffTarget,
   publicationPlanExecutorPreflightMessages,
   publicationPlanHasManualHandoffReady,
   publicationPlanManualHandoffTargets,
@@ -18,10 +17,12 @@ import type {
   Job,
   ManualHandoffTarget,
   PublicationAttempt,
+  PublicationEntryOpenRequest,
   PublicationPlan,
   PublicationPlatformPublishOptions,
   PublicationTarget,
 } from "../../types";
+import { writeTextToClipboard } from "../../utils/clipboard";
 
 type PublicationPlatformOptionDraft = {
   scheduled_publish_at: string;
@@ -35,6 +36,9 @@ type PublicationMaterialCard = {
   platform: string;
   platform_label: string;
   account_label?: string | null;
+  credential_ref?: string | null;
+  browser_profile_id?: string | null;
+  browser_binding?: Record<string, unknown>;
   adapter?: string | null;
   status?: string | null;
   has_title?: boolean;
@@ -168,10 +172,10 @@ async function copyText(value: string, label: string, setMessage: (value: string
     setMessage("当前项没有可复制内容。");
     return;
   }
-  try {
-    await navigator.clipboard.writeText(text);
+  const result = await writeTextToClipboard(text);
+  if (result.ok) {
     setMessage(label);
-  } catch {
+  } else {
     setMessage("浏览器拒绝写入剪贴板，请手动选择复制。");
   }
 }
@@ -190,6 +194,9 @@ function materialCardFromTarget(target: PublicationTarget): PublicationMaterialC
     platform: normalizePublicationPlatformId(target.platform),
     platform_label: target.platform_label,
     account_label: target.account_label,
+    credential_ref: target.credential_ref,
+    browser_profile_id: target.browser_profile_id,
+    browser_binding: target.browser_binding,
     adapter: target.adapter,
     status: target.status,
     has_title: target.has_title,
@@ -223,6 +230,9 @@ function materialCardFromManualTarget(target: ManualHandoffTarget): PublicationM
     platform: normalizePublicationPlatformId(richTarget.platform),
     platform_label: publicationPlatformLabel(richTarget.platform, richTarget.label || richTarget.platform_label),
     account_label: richTarget.account_label,
+    credential_ref: richTarget.credential_ref,
+    browser_profile_id: richTarget.browser_profile_id,
+    browser_binding: richTarget.browser_binding,
     adapter: richTarget.adapter,
     status: richTarget.status || "manual_handoff",
     has_title: richTarget.has_title,
@@ -309,11 +319,17 @@ function materialCoverPreviews(card: PublicationMaterialCard): Array<{ key: stri
   return previews;
 }
 
-function openPublicationEntry(card: PublicationMaterialCard): boolean {
+function buildPublicationEntryOpenRequest(card: PublicationMaterialCard): PublicationEntryOpenRequest | null {
   const url = compactCopy(card.manual_publish_entry_url || card.login_url);
-  if (!url || typeof window === "undefined") return false;
-  window.open(url, "_blank", "noopener,noreferrer");
-  return true;
+  if (!url) return null;
+  return {
+    url,
+    platform: card.platform,
+    account_label: card.account_label,
+    credential_ref: card.credential_ref,
+    browser_profile_id: card.browser_profile_id,
+    browser_binding: card.browser_binding,
+  };
 }
 
 function createEmptyPublicationPlatformOption(): PublicationPlatformOptionDraft {
@@ -623,6 +639,14 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
   const materialGenerationProgress = prepareMaterialsMutation.isPending && !activeMaterialTask
     ? 1
     : activeMaterialTaskProgress;
+  const openPublicationEntryMutation = useMutation({
+    mutationFn: (payload: PublicationEntryOpenRequest) => api.openPublicationEntry(payload),
+  });
+
+  const openPublicationEntry = (card: PublicationMaterialCard) => {
+    const payload = buildPublicationEntryOpenRequest(card);
+    if (payload) openPublicationEntryMutation.mutate(payload);
+  };
 
   const runOneClickPublish = () => {
     manualPublishCards.forEach((card) => openPublicationEntry(card));
@@ -788,7 +812,7 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
                   <div className="muted compact-top">{target.reason || "该平台需人工登录后继续发布。"}</div>
                 </div>
                 {target.login_url ? (
-                  <button type="button" className="button secondary" onClick={() => openManualHandoffTarget(target)}>
+                  <button type="button" className="button secondary" onClick={() => openPublicationEntry(materialCardFromManualTarget(target))}>
                     打开登录页
                   </button>
                 ) : null}
@@ -973,6 +997,7 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
         </div>
       ) : null}
       {prepareMaterialsMutation.error ? <div className="notice compact-top">{String(prepareMaterialsMutation.error)}</div> : null}
+      {openPublicationEntryMutation.error ? <div className="notice compact-top">{String(openPublicationEntryMutation.error)}</div> : null}
       {publishMutation.error ? <div className="notice compact-top">{String(publishMutation.error)}</div> : null}
       {publicationPlan.data?.existing_attempts?.length ? (
         <div className="timeline-list top-gap">
@@ -1006,7 +1031,7 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
             type="button"
             onClick={() => {
               manualHandoffTargets.forEach((target) => {
-                openManualHandoffTarget(target);
+                openPublicationEntry(materialCardFromManualTarget(target));
               });
             }}
           >
